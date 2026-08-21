@@ -19,10 +19,11 @@ import java.io.File
 class MainActivity : android.app.Activity() {
 
     companion object {
-        const val PREFS = "letta_env"
-        const val PREF_KEY = "api_key"
-        const val PREF_ENV = "env_name"
-        const val DEFAULT_ENV = "android"
+        // Single source: LettaEnvironmentService.PREFS etc.
+        private val PREFS = LettaEnvironmentService.PREFS
+        private val PREF_KEY = LettaEnvironmentService.PREF_KEY
+        private val PREF_ENV = LettaEnvironmentService.PREF_ENV
+        private val DEFAULT_ENV = LettaEnvironmentService.DEFAULT_ENV
     }
 
     private val handler = Handler(Looper.getMainLooper())

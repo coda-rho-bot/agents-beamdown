@@ -43,7 +43,7 @@ tar --hard-dereference -czf ../../app/src/main/assets/rootfs.tar -C /path/to/roo
 
 # 2. Build the APK (injects the four lib*.so binaries into lib/arm64-v8a post-build)
 cd ../..
-./gradlew assembleDebug -Pletta_api_key=sk-let-YOURKEY -Pletta_env_name=my-phone
+./gradlew assembleDebug
 ./tools/inject-libs.sh app/build/outputs/apk/debug/app-debug.apk
 
 # 3. Install
@@ -70,8 +70,8 @@ are pattern-searched and version-resilient within glibc 2.3x.
 
 - **OEM battery management**: Samsung (and others) freeze/kill background work;
   exempt the app (Settings → Battery → Unrestricted) for reliable long-run operation.
-- **API key is baked at build time** (v0.1) — each user builds with their own key.
-  First-run onboarding UI is on the roadmap.
+- **API key entered at first run** (v0.2.0 onboarding) — builds are key-free;
+  the app prompts for your key + environment name on first launch.
 - Single architecture (arm64-v8a). Debug-signed; release signing is a TODO.
 - Diagnostics suite runs at every service start (adds ~5s; will be debug-gated).
 
