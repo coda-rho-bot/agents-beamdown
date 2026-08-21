@@ -142,48 +142,72 @@ class LettaEnvironmentService : Service() {
         val dnsShim = File(filesDir, "dns-shim.js").absolutePath
         val bashDir = File(filesDir, "bin")
 
-        val pb = ProcessBuilder(
-            libLoader.absolutePath, "--library-path", libPath,
-            File(libDir, "libnode.so").absolutePath,
-            lettaJs,
-            "server",
-            "--env-name", BuildConfig.ENV_NAME,
-            "--debug"
-        ).redirectErrorStream(true)
+        val filesLibs = File(filesDir, "libs")
+        val combinedPath = libPath + ":" + filesLibs.absolutePath
+        // Launch via a script that mirrors the PROVEN adb test invocation:
+        // shell-redirected stdio (> log 2>&1 < /dev/null) avoids node's
+        // uv__close(fd<=2) assertion with Java ProcessBuilder fd plumbing.
+        val launchScript = File(filesDir, "launch-server.sh")
+        launchScript.writeText(
+            "#!/system/bin/sh\n" +
+            "cd ${filesDir.absolutePath}\n" +
+            "export HOME=${File(rootfsDir, "root").absolutePath}\n" +
+            "export TMPDIR=${File(rootfsDir, "tmp").absolutePath}\n" +
+            "export PATH=${bashDir.absolutePath}:/system/bin:/system/xbin\n" +
+            "export TERM=dumb\n" +
+            "export LETTA_API_KEY=${BuildConfig.LETTA_API_KEY}\n" +
+            "export LD_LIBRARY_PATH=$combinedPath\n" +
+            "export NODE_OPTIONS=\"--require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
+            "export UV_USE_IO_URING=0\n" +
+            "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name ${BuildConfig.ENV_NAME} --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
+        )
+        val stdinFile = File(filesDir, "stdin.txt")
+        if (!stdinFile.exists()) stdinFile.writeText("")
+        launchScript.setExecutable(true, false)
 
-        pb.directory(filesDir)
-
-        pb.environment().apply {
-            put("LETTA_API_KEY", BuildConfig.LETTA_API_KEY)
-            put("HOME", File(rootfsDir, "root").absolutePath)
-            put("TMPDIR", File(rootfsDir, "tmp").absolutePath)
-            put("PATH", "${bashDir.absolutePath}:/system/bin:/system/xbin")
-            put("TERM", "dumb")
-            put("LD_LIBRARY_PATH", libPath)
-            put("NODE_OPTIONS", "--require $dnsShim")
-        }
+        val pb = ProcessBuilder(launchScript.absolutePath)
 
         val p = pb.start()
         proc = p
-        log("Process started, streaming output...")
+        log("Process started, streaming output (via server-stdout.log)...")
 
-        p.inputStream.bufferedReader().forEachLine { line ->
-            log(line)
-            when {
-                line.contains("Registering with") -> {
-                    setStatus("registering with Letta Cloud")
-                    updateNotification("Registering...")
-                }
-                line.contains("Registered successfully") -> {
-                    setStatus("registered with Letta Cloud")
-                    updateNotification("Registered — online")
-                }
-                line.contains("[Listen V2]") -> {
-                    setStatus("online — listener active")
-                    updateNotification("Online — ${BuildConfig.ENV_NAME}")
-                }
+        // Output goes to a file (valid fd for the child); tail it for status.
+        val outLogFile = java.io.File(filesDir, "server-stdout.log")
+        val tailer = Thread {
+            var pos = 0L
+            while (proc?.isAlive != false) {
+                try {
+                    if (outLogFile.length() > pos) {
+                        java.io.RandomAccessFile(outLogFile, "r").use { raf ->
+                            raf.seek(pos)
+                            var line = raf.readLine()
+                            while (line != null) {
+                                log(line)
+                                when {
+                                    line.contains("Registering with") -> {
+                                        setStatus("registering with Letta Cloud")
+                                        updateNotification("Registering...")
+                                    }
+                                    line.contains("Registered successfully") -> {
+                                        setStatus("registered with Letta Cloud")
+                                        updateNotification("Registered — online")
+                                    }
+                                    line.contains("[Listen V2]") -> {
+                                        setStatus("online — listener active")
+                                        updateNotification("Online — ${BuildConfig.ENV_NAME}")
+                                    }
+                                }
+                                pos = raf.filePointer
+                                line = raf.readLine()
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+                Thread.sleep(500)
             }
         }
+        tailer.isDaemon = true
+        tailer.start()
 
         val code = p.waitFor()
         log("letta server exited: $code")
@@ -223,7 +247,7 @@ class LettaEnvironmentService : Service() {
      */
     private fun runDiagnostics(libDir: File, rootfsDir: File) {
         val loader = File(libDir, "libldlnx.so").absolutePath
-        val libPath = libDir.absolutePath
+        val libPath = libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath
         val sigsys = File(libDir, "libsigsys.so").absolutePath
         inProcessMapTests(libDir)
         // auxv dumper: what does the kernel tell this process about its CPU?
@@ -248,11 +272,17 @@ class LettaEnvironmentService : Service() {
             val rl = File(rootfsDir, "lib/aarch64-linux-gnu/ld-linux-aarch64.so.1").absolutePath
             val lp = File(rootfsDir, "lib/aarch64-linux-gnu").absolutePath + ":" + File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath
             val tb = File(rootfsDir, "usr/bin/true").absolutePath
-            val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath, File(libDir, "libtrue.so").absolutePath).redirectErrorStream(true)
+            val lettaJsP = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
+            val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath, File(libDir, "libnode.so").absolutePath, lettaJsP, "server", "--env-name", BuildConfig.ENV_NAME).redirectErrorStream(true)
+            pb3.environment()["NODE_OPTIONS"] = "--require " + File(filesDir, "dns-shim.js").absolutePath
+            pb3.environment()["LETTA_API_KEY"] = BuildConfig.LETTA_API_KEY
+            pb3.environment()["HOME"] = File(rootfsDir, "root").absolutePath
+            pb3.environment()["TMPDIR"] = File(rootfsDir, "tmp").absolutePath
+            pb3.environment()["PATH"] = File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin"
             pb3.environment().clear()
             val p3 = pb3.start()
             val o3 = StringBuilder()
-            val r3 = Thread { p3.inputStream.bufferedReader().forEachLine { o3.appendLine(it) } }
+            val r3 = Thread { try { p3.inputStream.bufferedReader().forEachLine { o3.appendLine(it) } } catch (_: Exception) {} }
             r3.isDaemon = true; r3.start()
             val fin3 = p3.waitFor(15, TimeUnit.SECONDS)
             if (!fin3) { p3.destroyForcibly(); log("DIAG stracelite: TIMEOUT") }
@@ -269,7 +299,7 @@ class LettaEnvironmentService : Service() {
             pb2.environment()["LD_DEBUG"] = "all"
             val p2 = pb2.start()
             val o2 = StringBuilder()
-            val r2 = Thread { p2.inputStream.bufferedReader().forEachLine { o2.appendLine(it) } }
+            val r2 = Thread { try { p2.inputStream.bufferedReader().forEachLine { o2.appendLine(it) } } catch (_: Exception) {} }
             r2.isDaemon = true; r2.start()
             val fin = p2.waitFor(10, TimeUnit.SECONDS)
             if (!fin) { p2.destroyForcibly(); log("DIAG envclean-true: TIMEOUT") }
@@ -296,7 +326,7 @@ class LettaEnvironmentService : Service() {
                 pb.environment().putAll(t.env)
                 val p = pb.start()
                 val out = StringBuilder()
-                val reader = Thread { p.inputStream.bufferedReader().forEachLine { out.appendLine(it) } }
+                val reader = Thread { try { p.inputStream.bufferedReader().forEachLine { out.appendLine(it) } } catch (_: Exception) {} }
                 reader.isDaemon = true
                 reader.start()
                 val finished = p.waitFor(10, TimeUnit.SECONDS)
@@ -323,8 +353,38 @@ class LettaEnvironmentService : Service() {
      *  - files/dns-shim.js   → copied from assets
      */
     private fun installSupportFiles(rootfsDir: File, libDir: File) {
-        val libPath = libDir.absolutePath
+        val filesLibs = File(filesDir, "libs")
+        val libPath = libDir.absolutePath + ":" + filesLibs.absolutePath
         val loaderFlag = "${File(libDir, "libldlnx.so").absolutePath} --library-path $libPath"
+
+        // original-name glibc libs: copied from rootfs (byte-patched, never patchelf'd).
+        // The loader maps app_data files fine (proven); sonames resolve by original names.
+        val libSources = listOf(
+            File(rootfsDir, "lib/aarch64-linux-gnu") to listOf("libc.so.6", "libm.so.6", "libdl.so.2"),
+            File(rootfsDir, "usr/lib/aarch64-linux-gnu") to listOf("libpthread.so.0", "libgcc_s.so.1", "libstdc++.so.6", "libtinfo.so.6", "libresolv.so.2")
+        )
+        filesLibs.mkdirs()
+        for ((dir, names) in libSources) {
+            for (n in names) {
+                val dst = File(filesLibs, n)
+                val src = File(dir, n)
+                if (src.exists() && !dst.exists()) {
+                    src.copyTo(dst)
+                }
+            }
+        }
+        // native addons into files/libs too (original names)
+        val nmRoot0 = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/node_modules")
+        val addons = listOf(
+            File(nmRoot0, "node-pty/build/Release/pty.node"),
+            File(nmRoot0, "@img/sharp-linux-arm64/lib/sharp-linux-arm64.node"),
+            File(nmRoot0, "@img/sharp-libvips-linux-arm64/lib/libvips-cpp.so.8.17.3")
+        )
+        for (a in addons) {
+            val dst = File(filesLibs, a.name)
+            if (a.exists() && !dst.exists()) a.copyTo(dst)
+        }
+        log("files/libs populated: ${filesLibs.listFiles()?.size} files")
 
         val shim = File(filesDir, "dns-shim.js")
         if (!shim.exists()) {
@@ -352,7 +412,7 @@ class LettaEnvironmentService : Service() {
         )
         for (t in linkTargets) {
             try {
-                val libCopy = File(libDir, mapOf("pty.node" to "libptynd.so", "sharp-linux-arm64.node" to "libsharpnd.so", "libvips-cpp.so.8.17.3" to "libvipscpp.so").getOrDefault(t.name, t.name))
+                val libCopy = File(File(filesDir, "libs"), t.name)
                 if (libCopy.exists() && t.exists() && !Files.isSymbolicLink(t.toPath())) {
                     t.delete()
                     Files.createSymbolicLink(t.toPath(), libCopy.toPath())
