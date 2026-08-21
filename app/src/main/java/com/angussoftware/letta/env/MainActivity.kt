@@ -155,6 +155,7 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun renderStatus() {
+        if (!::statusView.isInitialized) return // onboarding path never builds these views
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val env = prefs.getString(PREF_ENV, DEFAULT_ENV)
         val statusFile = File(filesDir, "status.txt")
