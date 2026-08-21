@@ -3,8 +3,11 @@ package com.angussoftware.letta.env
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -42,7 +45,9 @@ import java.util.concurrent.TimeUnit
 class LettaEnvironmentService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "letta-env"
+        // Dedicated channel for the persistent environment-running notification so users
+        // can control it independently from any future alert channels.
+        private const val CHANNEL_ID = "letta-env-status"
         private const val NOTIFICATION_ID = 42
         @Volatile private var proc: Process? = null
         private val starting = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -451,18 +456,47 @@ class LettaEnvironmentService : Service() {
 
     private fun createChannel() {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Letta Environment", NotificationManager.IMPORTANCE_LOW)
-        )
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Environment Status",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Persistent notification shown while the Letta environment is running on this device"
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(text: String): Notification =
-        NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Letta Environment")
+    private fun contentIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val flags = if (Build.VERSION.SDK_INT >= 23) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        return PendingIntent.getActivity(this, 0, intent, flags)
+    }
+
+    private fun buildNotification(text: String): Notification {
+        // Use the launcher icon as the large icon so the notification is recognisable.
+        val largeIcon = try {
+            BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher_foreground)
+        } catch (_: Exception) {
+            null
+        }
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Letta Environment — ${envName()}")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setLargeIcon(largeIcon)
             .setOngoing(true)
+            .setContentIntent(contentIntent())
+            .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
+    }
 
     private fun updateNotification(text: String) {
         val nm = getSystemService(NotificationManager::class.java)
