@@ -6,7 +6,7 @@
 # service; the loader maps app_data files fine (mapping was never the blocker).
 set -e
 R=${ROOTFS:-/tmp/zfold-build/rootfs}
-APK=${1:-/home/rhomancer/dev/ai/letta-environment-android/app/build/outputs/apk/debug/app-debug.apk}
+APK=${1:-$(dirname "$0")/../app/build/outputs/apk/debug/app-debug.apk}
 BT=${BT:-$HOME/Android/Sdk/build-tools/37.0.0}
 STAGE=$(mktemp -d)
 trap "rm -rf $STAGE" EXIT

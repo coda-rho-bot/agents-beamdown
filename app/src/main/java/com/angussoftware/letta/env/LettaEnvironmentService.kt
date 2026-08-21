@@ -46,7 +46,17 @@ class LettaEnvironmentService : Service() {
         private const val NOTIFICATION_ID = 42
         @Volatile private var proc: Process? = null
         private val starting = java.util.concurrent.atomic.AtomicBoolean(false)
+        const val PREFS = "letta_env"
+        const val PREF_KEY = "api_key"
+        const val PREF_ENV = "env_name"
+        const val DEFAULT_ENV = "android"
     }
+
+    private fun apiKey(): String =
+        getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "") ?: ""
+
+    private fun envName(): String =
+        getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV) ?: DEFAULT_ENV
 
     private var worker: Thread? = null
 
@@ -78,6 +88,12 @@ class LettaEnvironmentService : Service() {
     }
 
     private fun runEnvironment() {
+        if (apiKey().isBlank()) {
+            setStatus("no api key — open the app to configure")
+            updateNotification("Needs API key")
+            log("No API key configured; launch blocked until onboarding completes.")
+            return
+        }
         val rootfsDir = File(filesDir, "rootfs")
         val marker = File(filesDir, ".rootfs-extracted")
         val libDir = File(applicationInfo.nativeLibraryDir)
@@ -137,7 +153,7 @@ class LettaEnvironmentService : Service() {
         runDiagnostics(libDir, rootfsDir)
 
         setStatus("starting letta server")
-        log("Launching letta server (env: ${BuildConfig.ENV_NAME}, libdir: $libPath)...")
+        log("Launching letta server (env: ${envName()}, libdir: $libPath)...")
 
         val dnsShim = File(filesDir, "dns-shim.js").absolutePath
         val bashDir = File(filesDir, "bin")
@@ -155,11 +171,11 @@ class LettaEnvironmentService : Service() {
             "export TMPDIR=${File(rootfsDir, "tmp").absolutePath}\n" +
             "export PATH=${bashDir.absolutePath}:/system/bin:/system/xbin\n" +
             "export TERM=dumb\n" +
-            "export LETTA_API_KEY=${BuildConfig.LETTA_API_KEY}\n" +
+            "export LETTA_API_KEY=${apiKey()}\n" +
             "export LD_LIBRARY_PATH=$combinedPath\n" +
             "export NODE_OPTIONS=\"--require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
             "export UV_USE_IO_URING=0\n" +
-            "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name ${BuildConfig.ENV_NAME} --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
+            "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name ${envName()} --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
         )
         val stdinFile = File(filesDir, "stdin.txt")
         if (!stdinFile.exists()) stdinFile.writeText("")
@@ -194,7 +210,7 @@ class LettaEnvironmentService : Service() {
                                     }
                                     line.contains("[Listen V2]") -> {
                                         setStatus("online — listener active")
-                                        updateNotification("Online — ${BuildConfig.ENV_NAME}")
+                                        updateNotification("Online — ${envName()}")
                                     }
                                 }
                                 pos = raf.filePointer
@@ -273,9 +289,9 @@ class LettaEnvironmentService : Service() {
             val lp = File(rootfsDir, "lib/aarch64-linux-gnu").absolutePath + ":" + File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath
             val tb = File(rootfsDir, "usr/bin/true").absolutePath
             val lettaJsP = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
-            val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath, File(libDir, "libnode.so").absolutePath, lettaJsP, "server", "--env-name", BuildConfig.ENV_NAME).redirectErrorStream(true)
+            val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath, File(libDir, "libnode.so").absolutePath, lettaJsP, "server", "--env-name", envName()).redirectErrorStream(true)
             pb3.environment()["NODE_OPTIONS"] = "--require " + File(filesDir, "dns-shim.js").absolutePath
-            pb3.environment()["LETTA_API_KEY"] = BuildConfig.LETTA_API_KEY
+            pb3.environment()["LETTA_API_KEY"] = apiKey()
             pb3.environment()["HOME"] = File(rootfsDir, "root").absolutePath
             pb3.environment()["TMPDIR"] = File(rootfsDir, "tmp").absolutePath
             pb3.environment()["PATH"] = File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin"
@@ -430,7 +446,7 @@ class LettaEnvironmentService : Service() {
     }
 
     private fun setStatus(s: String) {
-        File(filesDir, "status.txt").writeText("env=${BuildConfig.ENV_NAME}\nstate=$s\n")
+        File(filesDir, "status.txt").writeText("env=${envName()}\nstate=$s\n")
     }
 
     private fun createChannel() {

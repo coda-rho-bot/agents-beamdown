@@ -13,10 +13,6 @@ android {
         targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
-        val apiKey = (project.findProperty("letta_api_key") as String?) ?: ""
-        val envName = (project.findProperty("letta_env_name") as String?) ?: "zfold-7"
-        buildConfigField("String", "LETTA_API_KEY", "\"$apiKey\"")
-        buildConfigField("String", "ENV_NAME", "\"$envName\"")
     }
 
     buildTypes {
