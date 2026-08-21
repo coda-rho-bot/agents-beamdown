@@ -59,6 +59,7 @@ for f in "$D"/*; do
 done
 
 cp "$(dirname "$0")/libsigsys.so" "$D/libsigsys.so"
+cp "$(dirname "$0")/libzerodep.so" "$D/libzerodep.so"
 python3 "$(dirname "$0")/inject.py" "$APK" "$STAGE"
 "$BT/zipalign" -f 4 "$APK" "$APK.aligned" && mv "$APK.aligned" "$APK"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android "$APK"

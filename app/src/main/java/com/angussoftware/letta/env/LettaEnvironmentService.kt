@@ -191,6 +191,28 @@ class LettaEnvironmentService : Service() {
         updateNotification("Stopped (exit $code)")
     }
 
+    /** In-process mmap-exec matrix: can the ART runtime dlopen exec-mapped files? */
+    private fun inProcessMapTests(libDir: File) {
+        try {
+            System.load(File(libDir, "libzerodep.so").absolutePath)
+            log("DIAG sysload-libdir: OK (in-process dlopen of apk lib works)")
+        } catch (t: Throwable) {
+            log("DIAG sysload-libdir: FAIL ${t.message}")
+        }
+        try {
+            val dataCopy = File(filesDir, "libzerodep-data.so")
+            if (!dataCopy.exists()) {
+                File(libDir, "libzerodep.so").inputStream().use { input ->
+                    dataCopy.outputStream().use { input.copyTo(it) }
+                }
+            }
+            System.load(dataCopy.absolutePath)
+            log("DIAG sysload-appdata: OK (in-process dlopen of app_data works)")
+        } catch (t: Throwable) {
+            log("DIAG sysload-appdata: FAIL ${t.message}")
+        }
+    }
+
     /**
      * Staged verification + forensics:
      *   sig-sys / sig-segv  → verify Java exit-value encoding is 128+signal
@@ -203,6 +225,60 @@ class LettaEnvironmentService : Service() {
         val loader = File(libDir, "libldlnx.so").absolutePath
         val libPath = libDir.absolutePath
         val sigsys = File(libDir, "libsigsys.so").absolutePath
+        inProcessMapTests(libDir)
+        // auxv dumper: what does the kernel tell this process about its CPU?
+        try {
+            val auxvBin = File(filesDir, "auxv")
+            if (!auxvBin.exists()) {
+                assets.open("diag-auxv").use { input -> auxvBin.outputStream().use { input.copyTo(it) } }
+                auxvBin.setExecutable(true, false)
+            }
+            val pa = ProcessBuilder(auxvBin.absolutePath).redirectErrorStream(true).start()
+            val ao = pa.inputStream.bufferedReader().readText()
+            pa.waitFor()
+            log("DIAG auxv: ${ao.replace("\n", " | ").take(400)}")
+        } catch (e: Exception) { log("DIAG auxv: FAIL ${e.message}") }
+        // strace-lite: ptrace the dying chain, capture every syscall nr
+        try {
+            val stl = File(filesDir, "stracelite")
+            if (!stl.exists()) {
+                assets.open("diag-stracelite").use { input -> stl.outputStream().use { input.copyTo(it) } }
+                stl.setExecutable(true, false)
+            }
+            val rl = File(rootfsDir, "lib/aarch64-linux-gnu/ld-linux-aarch64.so.1").absolutePath
+            val lp = File(rootfsDir, "lib/aarch64-linux-gnu").absolutePath + ":" + File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath
+            val tb = File(rootfsDir, "usr/bin/true").absolutePath
+            val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath, File(libDir, "libtrue.so").absolutePath).redirectErrorStream(true)
+            pb3.environment().clear()
+            val p3 = pb3.start()
+            val o3 = StringBuilder()
+            val r3 = Thread { p3.inputStream.bufferedReader().forEachLine { o3.appendLine(it) } }
+            r3.isDaemon = true; r3.start()
+            val fin3 = p3.waitFor(15, TimeUnit.SECONDS)
+            if (!fin3) { p3.destroyForcibly(); log("DIAG stracelite: TIMEOUT") }
+            else {
+                val f3 = o3.toString()
+                File(filesDir, "diag-stracelite.txt").writeText(f3)
+                log("DIAG stracelite: exit=${p3.exitValue()} lines=${f3.lines().size} last10='${f3.trim().lines().takeLast(10).joinToString(" | ")}'")
+            }
+        } catch (e: Exception) { log("DIAG stracelite: FAIL ${e.message}") }
+        // env-clean glibc chain: does clearing the inherited Zygote env fix it?
+        try {
+            val pb2 = ProcessBuilder(File(rootfsDir, "lib/aarch64-linux-gnu/ld-linux-aarch64.so.1").absolutePath, "--library-path", File(rootfsDir, "lib/aarch64-linux-gnu").absolutePath + ":" + File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath, File(rootfsDir, "usr/bin/true").absolutePath).redirectErrorStream(true)
+            pb2.environment().clear()
+            pb2.environment()["LD_DEBUG"] = "all"
+            val p2 = pb2.start()
+            val o2 = StringBuilder()
+            val r2 = Thread { p2.inputStream.bufferedReader().forEachLine { o2.appendLine(it) } }
+            r2.isDaemon = true; r2.start()
+            val fin = p2.waitFor(10, TimeUnit.SECONDS)
+            if (!fin) { p2.destroyForcibly(); log("DIAG envclean-true: TIMEOUT") }
+            else {
+                val f2 = o2.toString()
+                File(filesDir, "diag-envclean.txt").writeText(f2)
+                log("DIAG envclean-true: exit=${p2.exitValue()} len=${f2.length} tail='${f2.trim().takeLast(150)}'")
+            }
+        } catch (e: Exception) { log("DIAG envclean-true: FAIL ${e.message}") }
         data class T(val name: String, val cmd: List<String>, val env: Map<String, String> = emptyMap())
         val tests = listOf(
             T("sig-sys", listOf("/system/bin/sh", "-c", "kill -SYS \$\$")),
@@ -210,6 +286,8 @@ class LettaEnvironmentService : Service() {
             T("exit159", listOf("/system/bin/sh", "-c", "exit 159")),
             T("libdir-true", listOf(loader, "--library-path", libPath, File(libDir, "libtrue.so").absolutePath)),
             T("libdir-true-catch", listOf(loader, "--library-path", libPath, File(libDir, "libtrue.so").absolutePath), mapOf("LD_PRELOAD" to sigsys)),
+            T("libdir-true-debug", listOf(loader, "--library-path", libPath, File(libDir, "libtrue.so").absolutePath), mapOf("LD_DEBUG" to "all")),
+            T("rootfs-orig-debug", listOf(File(rootfsDir, "lib/aarch64-linux-gnu/ld-linux-aarch64.so.1").absolutePath, "--library-path", File(rootfsDir, "lib/aarch64-linux-gnu").absolutePath + ":" + File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath, File(rootfsDir, "usr/bin/true").absolutePath), mapOf("LD_DEBUG" to "all")),
             T("libdir-node-catch", listOf(loader, "--library-path", libPath, File(libDir, "libnode.so").absolutePath, "--version"), mapOf("LD_PRELOAD" to sigsys))
         )
         for (t in tests) {
@@ -227,7 +305,11 @@ class LettaEnvironmentService : Service() {
                     log("DIAG ${t.name}: TIMEOUT (killed)")
                     continue
                 }
-                log("DIAG ${t.name}: exit=${p.exitValue()} tail='${out.toString().trim().takeLast(200)}'")
+                val full = out.toString()
+                if (t.name.endsWith("debug")) {
+                    File(filesDir, "diag-" + t.name + ".txt").writeText(full)
+                }
+                log("DIAG ${t.name}: exit=${p.exitValue()} len=${full.length} tail='${full.trim().takeLast(200)}'")
             } catch (e: Exception) {
                 log("DIAG ${t.name}: ${e.javaClass.simpleName}: ${e.message}")
             }
