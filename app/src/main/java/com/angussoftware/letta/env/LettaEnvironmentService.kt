@@ -465,6 +465,8 @@ class LettaEnvironmentService : Service() {
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)
+        // Remove the pre-v0.2.3 generic channel so it does not linger in system settings.
+        nm.deleteNotificationChannel("letta-env")
     }
 
     private fun contentIntent(): PendingIntent {
@@ -482,7 +484,7 @@ class LettaEnvironmentService : Service() {
     private fun buildNotification(text: String): Notification {
         // Use the launcher icon as the large icon so the notification is recognisable.
         val largeIcon = try {
-            BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher_foreground)
+            BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
         } catch (_: Exception) {
             null
         }
