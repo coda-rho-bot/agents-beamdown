@@ -192,21 +192,31 @@ class LettaEnvironmentService : Service() {
     }
 
     /**
-     * Minimal staged verification that the libdir loader chain works.
-     *   libdir-true  → loader + libc + guest binary, all from libdir
-     *   libdir-node  → full node startup via the production invocation
+     * Staged verification + forensics:
+     *   sig-sys / sig-segv  → verify Java exit-value encoding is 128+signal
+     *   libdir-true/node    → loader chain sanity
+     *   *-catch variants    → LD_PRELOAD SIGSYS catcher prints the trapped
+     *                         syscall number (si_syscall) if death occurs
+     *                         after preload constructors run
      */
     private fun runDiagnostics(libDir: File, rootfsDir: File) {
         val loader = File(libDir, "libldlnx.so").absolutePath
         val libPath = libDir.absolutePath
-        data class T(val name: String, val cmd: List<String>)
+        val sigsys = File(libDir, "libsigsys.so").absolutePath
+        data class T(val name: String, val cmd: List<String>, val env: Map<String, String> = emptyMap())
         val tests = listOf(
+            T("sig-sys", listOf("/system/bin/sh", "-c", "kill -SYS \$\$")),
+            T("sig-segv", listOf("/system/bin/sh", "-c", "kill -SEGV \$\$")),
+            T("exit159", listOf("/system/bin/sh", "-c", "exit 159")),
             T("libdir-true", listOf(loader, "--library-path", libPath, File(libDir, "libtrue.so").absolutePath)),
-            T("libdir-node", listOf(loader, "--library-path", libPath, File(libDir, "libnode.so").absolutePath, "--version"))
+            T("libdir-true-catch", listOf(loader, "--library-path", libPath, File(libDir, "libtrue.so").absolutePath), mapOf("LD_PRELOAD" to sigsys)),
+            T("libdir-node-catch", listOf(loader, "--library-path", libPath, File(libDir, "libnode.so").absolutePath, "--version"), mapOf("LD_PRELOAD" to sigsys))
         )
         for (t in tests) {
             try {
-                val p = ProcessBuilder(t.cmd).redirectErrorStream(true).start()
+                val pb = ProcessBuilder(t.cmd).redirectErrorStream(true)
+                pb.environment().putAll(t.env)
+                val p = pb.start()
                 val out = StringBuilder()
                 val reader = Thread { p.inputStream.bufferedReader().forEachLine { out.appendLine(it) } }
                 reader.isDaemon = true
@@ -217,7 +227,7 @@ class LettaEnvironmentService : Service() {
                     log("DIAG ${t.name}: TIMEOUT (killed)")
                     continue
                 }
-                log("DIAG ${t.name}: exit=${p.exitValue()} tail='${out.toString().trim().takeLast(150)}'")
+                log("DIAG ${t.name}: exit=${p.exitValue()} tail='${out.toString().trim().takeLast(200)}'")
             } catch (e: Exception) {
                 log("DIAG ${t.name}: ${e.javaClass.simpleName}: ${e.message}")
             }

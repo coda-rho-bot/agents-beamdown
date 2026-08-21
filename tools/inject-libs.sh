@@ -58,8 +58,10 @@ for f in "$D"/*; do
   done
 done
 
+cp "$(dirname "$0")/libsigsys.so" "$D/libsigsys.so"
 python3 "$(dirname "$0")/inject.py" "$APK" "$STAGE"
 "$BT/zipalign" -f 4 "$APK" "$APK.aligned" && mv "$APK.aligned" "$APK"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android "$APK"
 echo "=== injected + signed: $APK ==="
 unzip -l "$APK" | grep -E "lib/arm64-v8a/" | awk '{print $1, $4}' | sort -k2
+# SIGSYS diagnostic preload (exec-mapped: must live in libdir)
