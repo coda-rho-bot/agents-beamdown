@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  * .node native addons — ships in lib/arm64-v8a (injected post-build because
  * AGP filters non-lib*.so names) and is invoked as:
  *
- *   <libdir>/ld-linux-aarch64.so.1 --library-path <libdir> <libdir>/libnode.so <letta.js> server ...
+ *   <libdir>/libldlnx.so --library-path <libdir> <libdir>/libnode.so <letta.js> server ...
  *
  * Additional Android fixes layered on top:
  *   - letta.js ships PRE-PATCHED: link()/linkSync() lock files replaced with
@@ -81,7 +81,7 @@ class LettaEnvironmentService : Service() {
         val rootfsDir = File(filesDir, "rootfs")
         val marker = File(filesDir, ".rootfs-extracted")
         val libDir = File(applicationInfo.nativeLibraryDir)
-        val libLoader = File(libDir, "ld-linux-aarch64.so.1")
+        val libLoader = File(libDir, "libldlnx.so")
 
         // Self-heal: corrupted earlier extraction leaves marker but incomplete rootfs.
         if (marker.exists() && !File(rootfsDir, "usr/local/bin/node").exists()) {
@@ -197,7 +197,7 @@ class LettaEnvironmentService : Service() {
      *   libdir-node  → full node startup via the production invocation
      */
     private fun runDiagnostics(libDir: File, rootfsDir: File) {
-        val loader = File(libDir, "ld-linux-aarch64.so.1").absolutePath
+        val loader = File(libDir, "libldlnx.so").absolutePath
         val libPath = libDir.absolutePath
         data class T(val name: String, val cmd: List<String>)
         val tests = listOf(
@@ -227,13 +227,12 @@ class LettaEnvironmentService : Service() {
     /**
      * Runtime wiring that depends on the per-install libdir path:
      *  - files/bin/bash      → wrapper chaining into libdir Debian bash
-     *  - node_modules rg     → wrapper script delegating to libdir/librg.so
      *  - native addons       → symlinks from node_modules into libdir
      *  - files/dns-shim.js   → copied from assets
      */
     private fun installSupportFiles(rootfsDir: File, libDir: File) {
         val libPath = libDir.absolutePath
-        val loaderFlag = "${File(libDir, "ld-linux-aarch64.so.1").absolutePath} --library-path $libPath"
+        val loaderFlag = "${File(libDir, "libldlnx.so").absolutePath} --library-path $libPath"
 
         val shim = File(filesDir, "dns-shim.js")
         if (!shim.exists()) {
@@ -250,17 +249,10 @@ class LettaEnvironmentService : Service() {
         bash.setExecutable(true, false)
         log("bash wrapper installed")
 
-        // ripgrep: replace the glibc binary with a delegating script
-        val nmRoot = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/node_modules")
-        val rg = File(nmRoot, "@vscode/vscode-ripgrep-linux-arm64/bin/rg")
-        val librg = File(libDir, "librg.so")
-        if (rg.exists() && librg.exists()) {
-            rg.writeText("#!/system/bin/sh\nexec $loaderFlag ${librg.absolutePath} \"$@\"\n")
-            rg.setExecutable(true, false)
-            log("rg wrapper installed")
-        }
+        // ripgrep is statically linked (musl) — execve from app_data works as-is.
 
         // native addons: symlink into libdir (dlopen'd with PROT_EXEC)
+        val nmRoot = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/node_modules")
         val linkTargets = listOf(
             File(nmRoot, "node-pty/build/Release/pty.node"),
             File(nmRoot, "@img/sharp-linux-arm64/lib/sharp-linux-arm64.node"),
@@ -268,7 +260,7 @@ class LettaEnvironmentService : Service() {
         )
         for (t in linkTargets) {
             try {
-                val libCopy = File(libDir, t.name)
+                val libCopy = File(libDir, mapOf("pty.node" to "libptynd.so", "sharp-linux-arm64.node" to "libsharpnd.so", "libvips-cpp.so.8.17.3" to "libvipscpp.so").getOrDefault(t.name, t.name))
                 if (libCopy.exists() && t.exists() && !Files.isSymbolicLink(t.toPath())) {
                     t.delete()
                     Files.createSymbolicLink(t.toPath(), libCopy.toPath())
