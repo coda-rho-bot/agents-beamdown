@@ -21,6 +21,15 @@ Patches (arm64 instructions, file-offset == vaddr for these segments):
      -> uv__close(fd<=2) -> assert abort. The exact value is load-bearing.
   4. letta.js: link()/linkSync() lock files -> writeFileSync(flag:"wx")
      Android SELinux denies hardlinks on app_data_file. Two sites.
+  5. node uv__close assert (core.c:646) -> skip fds <= 2 instead of abort
+     The assert "fd > STDERR_FILENO" aborts node whenever libuv closes an
+     fd that landed in a freed low slot (a stdio fd closed/reused during
+     bootstrap). Resurfaced Aug 28 2026: after a Samsung update every
+     fresh server launch died at bootstrap (exit 134) while `node
+     --version` via pipes worked. Retarget the b.le assert-branch to the
+     function epilogue: fds <= 2 are returned unclosed (libuv's own
+     "never close stdio" philosophy, minus the abort). uv__close @ vaddr
+     0x1c2ec00, file offset = vaddr - 0x400000 (text delta).
 
 Do NOT add defensive patches for untrapped syscalls: a close_range -> ENOSYS
 patch once made glibc's closefrom fall back to a brute-force close loop that
@@ -108,6 +117,24 @@ def main(rootfs):
         n += 1
     print(f"  letta.js: {n} link site(s) patched")
     open(letta, "wb").write(s.encode("utf-8", "surrogateescape"))
+
+    print("5. node uv__close assert -> skip fds <= 2")
+    # uv__close @ vaddr 0x1c2ec00; .text vaddr->file delta is 0x400000.
+    # 1c2ec0c: cmp w0,#2 ; 1c2ec10: b.le 0x1c2ec58 (assert path)
+    # Retarget b.le to 0x1c2ec4c (epilogue): 4d020054 -> ed010054.
+    off = 0x1C2EC10 - 0x400000
+    old = bytes.fromhex("4d020054")
+    new = bytes.fromhex("ed010054")
+    data = bytearray(open(node, "rb").read())
+    cur = bytes(data[off : off + 4])
+    if cur == old:
+        data[off : off + 4] = new
+        open(node, "wb").write(data)
+        print("  node: uv__close b.le assert-path -> epilogue (fds <= 2 skipped, not closed)")
+    elif cur == new:
+        print("  node: already patched")
+    else:
+        sys.exit(f"FATAL: unexpected bytes at node+{off:#x}: {cur.hex()} — node build changed, re-derive offset")
 
     print("done.")
 

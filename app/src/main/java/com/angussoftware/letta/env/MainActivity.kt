@@ -128,10 +128,29 @@ class MainActivity : android.app.Activity() {
             text = "Change API key / name"
             setOnClickListener { showOnboarding() }
         }
+        val upgradeBtn = Button(this).apply {
+            text = "Upgrade letta-code"
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Upgrade letta-code?")
+                    .setMessage("Downloads the latest @letta-ai/letta-code via npm, re-applies the Android patches, and restarts the environment. The server will be offline for a few minutes.")
+                    .setPositiveButton("Upgrade") { _, _ ->
+                        ensureRuntimePermissions()
+                        val intent = Intent(this@MainActivity, LettaEnvironmentService::class.java).apply {
+                            action = LettaEnvironmentService.ACTION_UPGRADE
+                        }
+                        startForegroundService(intent)
+                        Toast.makeText(this@MainActivity, "Upgrading — watch the status", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
         root.addView(statusView)
         root.addView(startBtn)
         root.addView(stopBtn)
         root.addView(rekeyBtn)
+        root.addView(upgradeBtn)
         val scroll = ScrollView(this).apply { addView(logView) }
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)

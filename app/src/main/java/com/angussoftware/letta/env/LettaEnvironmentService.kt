@@ -53,6 +53,7 @@ class LettaEnvironmentService : Service() {
         private val starting = java.util.concurrent.atomic.AtomicBoolean(false)
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
+        const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
     }
@@ -70,6 +71,27 @@ class LettaEnvironmentService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
+
+        if (intent?.action == ACTION_UPGRADE) {
+            if (!starting.compareAndSet(false, true)) {
+                log("upgrade requested while busy — ignoring")
+                return START_STICKY
+            }
+            worker = Thread {
+                try {
+                    upgradeLetta()
+                    runEnvironment()
+                } catch (t: Throwable) {
+                    log("UPGRADE FATAL: ${t.message}")
+                    setStatus("upgrade failed: ${t.message}")
+                    updateNotification("Upgrade failed")
+                } finally {
+                    starting.set(false)
+                }
+            }.also { it.start() }
+            return START_STICKY
+        }
+
         setStatus("starting")
 
         if (!starting.compareAndSet(false, true)) {
@@ -90,6 +112,114 @@ class LettaEnvironmentService : Service() {
         }.also { it.start() }
 
         return START_STICKY
+    }
+
+    /**
+     * Upgrade @letta-ai/letta-code inside the rootfs via npm, re-apply the
+     * Android-specific letta.js patches (SELinux forbids the hardlink-based
+     * locks), then hand back to runEnvironment() to relaunch the server.
+     */
+    private fun upgradeLetta() {
+        val libDir = File(applicationInfo.nativeLibraryDir)
+        val libLoader = File(libDir, "libldlnx.so")
+        val rootfsDir = File(filesDir, "rootfs")
+        val nodeModules = File(rootfsDir, "usr/local/lib/node_modules")
+        val npmCli = File(nodeModules, "npm/bin/npm-cli.js")
+        val pkgJson = File(nodeModules, "@letta-ai/letta-code/package.json")
+
+        fun currentVersion(): String = try {
+            val m = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(pkgJson.readText())
+            m?.groupValues?.get(1) ?: "unknown"
+        } catch (_: Exception) { "unknown" }
+
+        val before = currentVersion()
+        setStatus("upgrading letta-code (from $before)")
+        updateNotification("Upgrading letta-code...")
+        log("UPGRADE: current version $before")
+
+        // 1. Stop the running server (it holds the install we're replacing).
+        try { proc?.destroy() } catch (_: Exception) {}
+        runCatching { proc?.waitFor(5, TimeUnit.SECONDS) }
+        proc = null
+
+        // 2. npm install -g @letta-ai/letta-code@latest via the loader chain.
+        //    --ignore-scripts: postinstall spawns `node` via process.execPath,
+        //    which is the loader invocation here and cannot be re-spawned raw.
+        val before2 = before
+        val npmEnv = mapOf(
+            "HOME" to File(rootfsDir, "root").absolutePath,
+            "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
+            "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
+            "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
+            "NODE_OPTIONS" to "--require ${File(filesDir, "dns-shim.js").absolutePath}",
+            "UV_USE_IO_URING" to "0"
+        )
+        val pb = ProcessBuilder(
+            libLoader.absolutePath, "--library-path", npmEnv["LD_LIBRARY_PATH"]!!,
+            File(libDir, "libnode.so").absolutePath, npmCli.absolutePath,
+            "install", "-g", "@letta-ai/letta-code@latest", "--ignore-scripts",
+            "--prefix", File(rootfsDir, "usr/local").absolutePath
+        ).apply {
+            environment().clear()
+            environment().putAll(npmEnv)
+            redirectErrorStream(true)
+        }
+        log("UPGRADE: running npm install @letta-ai/letta-code@latest ...")
+        val p = try { pb.start() } catch (t: Throwable) {
+            log("UPGRADE: npm failed to start: ${t.message}")
+            setStatus("upgrade failed: ${t.message}")
+            return
+        }
+        // Stream npm output into server.log (cap at ~200 lines for sanity).
+        val reader = Thread {
+            try {
+                p.inputStream.bufferedReader().forEachLine { log("npm: $it") }
+            } catch (_: Exception) {}
+        }.also { it.isDaemon = true; it.start() }
+        val finished = p.waitFor(10, TimeUnit.MINUTES)
+        if (!finished) {
+            p.destroyForcibly()
+            log("UPGRADE: npm timed out after 10 minutes")
+            setStatus("upgrade failed: npm timeout")
+            updateNotification("Upgrade failed")
+            return
+        }
+        log("UPGRADE: npm exit code ${p.exitValue()}")
+
+        // 3. Re-apply Android patches to the fresh letta.js (hardlink locks
+        //    are denied by SELinux on app_data_file). Mirror of patch #4 in
+        //    tools/rootfs-build/patch-binaries.py — keep both in sync.
+        val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
+        if (lettaJs.exists()) {
+            val s = lettaJs.readText()
+            var patched = 0
+            var out = s
+            if ("linkSync(candidatePath, targetPath);" in out) {
+                out = out.replace("linkSync(candidatePath, targetPath);",
+                    "writeFileSync4(targetPath, ownerToken, { flag: \"wx\" });")
+                patched++
+            }
+            if ("await link3(candidatePath, targetPath);" in out) {
+                out = out.replace("await link3(candidatePath, targetPath);",
+                    "await writeFile15(targetPath, contents, { flag: \"wx\" });")
+                patched++
+            }
+            if (patched > 0) {
+                lettaJs.writeText(out)
+                log("UPGRADE: re-applied $patched letta.js link() patch(es)")
+            } else {
+                log("UPGRADE: WARNING — 0 link() patch sites found in new letta.js; " +
+                    "lock-file hardlinks will fail under SELinux. Upstream code changed — " +
+                    "update the patch patterns in the service AND patch-binaries.py.")
+            }
+        } else {
+            log("UPGRADE: WARNING — letta.js not found after npm install")
+        }
+
+        val after = currentVersion()
+        log("UPGRADE: $before2 -> $after")
+        setStatus("upgraded to $after — restarting")
+        updateNotification("Upgraded to $after — restarting")
     }
 
     private fun runEnvironment() {
