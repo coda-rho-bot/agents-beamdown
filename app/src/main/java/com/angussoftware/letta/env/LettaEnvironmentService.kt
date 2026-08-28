@@ -151,6 +151,7 @@ class LettaEnvironmentService : Service() {
         }
 
         installSupportFiles(rootfsDir, libDir)
+        sweepStaleListenerLocks(rootfsDir)
 
         val libPath = libDir.absolutePath
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
@@ -441,6 +442,42 @@ class LettaEnvironmentService : Service() {
                 }
             } catch (e: Exception) {
                 log("WARN: link failed for ${t.name}: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Delete listener locks whose owning process is gone. The letta.js lock
+     * (writeFileSync wx) assumes clean shutdown; Android kills the whole
+     * process tree on force-stop/OOM/reboot without cleanup, and every
+     * subsequent start then fails with "already running (pid N)". A lock is
+     * stale when its pid is not running, or is running but is not one of our
+     * libldlnx/letta processes (pid recycled to an unrelated app — cmdline
+     * only reads back for same-uid processes, so unreadable also means not ours).
+     */
+    private fun sweepStaleListenerLocks(rootfsDir: File) {
+        val listeners = File(rootfsDir, "root/.letta/listeners")
+        val locks = listeners.listFiles { f -> f.name.endsWith(".lock") } ?: return
+        for (lock in locks) {
+            try {
+                val text = lock.readText()
+                val pid = Regex("\"pid\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)
+                if (pid.isNullOrEmpty()) {
+                    log("Lock sweep: ${lock.name} has no pid — leaving it (manual review)")
+                    continue
+                }
+                val procDir = File("/proc/$pid")
+                val alive = procDir.isDirectory
+                val ours = alive && runCatching {
+                    val cmdline = File(procDir, "cmdline").readText()
+                    cmdline.contains("libldlnx") || cmdline.contains("letta")
+                }.getOrDefault(false)
+                if (alive && ours) continue
+                val reason = if (!alive) "pid $pid not running" else "pid $pid not our process"
+                if (lock.delete()) log("Lock sweep: removed stale ${lock.name} ($reason)")
+                else log("Lock sweep: FAILED to delete ${lock.name} ($reason)")
+            } catch (e: Exception) {
+                log("Lock sweep: error on ${lock.name}: ${e.message}")
             }
         }
     }
