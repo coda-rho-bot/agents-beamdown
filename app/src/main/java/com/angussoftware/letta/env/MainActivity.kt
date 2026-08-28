@@ -89,6 +89,7 @@ class MainActivity : android.app.Activity() {
                 // wipe any prior runtime state so a re-key restarts clean
                 File(filesDir, "launch-server.sh").delete()
                 File(filesDir, "server.log").delete()
+                ensureRuntimePermissions()
                 showMain()
                 startEnvironment()
             }
@@ -115,11 +116,7 @@ class MainActivity : android.app.Activity() {
         val startBtn = Button(this).apply {
             text = "Start environment"
             setOnClickListener {
-                if (Build.VERSION.SDK_INT >= 33 &&
-                    checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
-                }
+                ensureRuntimePermissions()
                 startEnvironment()
             }
         }
@@ -138,6 +135,29 @@ class MainActivity : android.app.Activity() {
         val scroll = ScrollView(this).apply { addView(logView) }
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
+    }
+
+    /**
+     * Request any missing runtime permissions before the environment starts.
+     * targetSdk 28 = legacy external storage, so READ/WRITE_EXTERNAL_STORAGE
+     * runtime grants give the agent's processes full /sdcard path access.
+     */
+    private fun ensureRuntimePermissions() {
+        val wanted = mutableListOf<String>()
+        if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            wanted.add(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            wanted.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            wanted.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (wanted.isNotEmpty()) {
+            requestPermissions(wanted.toTypedArray(), 1)
+        }
     }
 
     private fun startEnvironment() {
