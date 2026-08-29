@@ -145,7 +145,6 @@ class LettaEnvironmentService : Service() {
         // 2. npm install -g @letta-ai/letta-code@latest via the loader chain.
         //    --ignore-scripts: postinstall spawns `node` via process.execPath,
         //    which is the loader invocation here and cannot be re-spawned raw.
-        val before2 = before
         val npmEnv = mapOf(
             "HOME" to File(rootfsDir, "root").absolutePath,
             "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
@@ -170,7 +169,7 @@ class LettaEnvironmentService : Service() {
             setStatus("upgrade failed: ${t.message}")
             return
         }
-        // Stream npm output into server.log (cap at ~200 lines for sanity).
+        // Stream npm output into server.log.
         val reader = Thread {
             try {
                 p.inputStream.bufferedReader().forEachLine { log("npm: $it") }
@@ -184,11 +183,20 @@ class LettaEnvironmentService : Service() {
             updateNotification("Upgrade failed")
             return
         }
-        log("UPGRADE: npm exit code ${p.exitValue()}")
+        val npmExit = p.exitValue()
+        log("UPGRADE: npm exit code $npmExit")
+        if (npmExit != 0) {
+            log("UPGRADE: npm FAILED — restarting with whatever is installed (npm usually leaves the previous version intact)")
+            setStatus("npm failed (exit $npmExit) — restarting")
+            updateNotification("Upgrade failed — restarting")
+            return
+        }
 
         // 3. Re-apply Android patches to the fresh letta.js (hardlink locks
         //    are denied by SELinux on app_data_file). Mirror of patch #4 in
         //    tools/rootfs-build/patch-binaries.py — keep both in sync.
+        //    (Kotlin replace patches ALL occurrences; the Python side uses
+        //    count=1 — both patterns are single-site in practice.)
         val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
         if (lettaJs.exists()) {
             val s = lettaJs.readText()
@@ -217,7 +225,7 @@ class LettaEnvironmentService : Service() {
         }
 
         val after = currentVersion()
-        log("UPGRADE: $before2 -> $after")
+        log("UPGRADE: $before -> $after")
         setStatus("upgraded to $after — restarting")
         updateNotification("Upgraded to $after — restarting")
     }
