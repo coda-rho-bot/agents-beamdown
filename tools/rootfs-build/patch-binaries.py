@@ -21,7 +21,12 @@ Patches (arm64 instructions, file-offset == vaddr for these segments):
      -> uv__close(fd<=2) -> assert abort. The exact value is load-bearing.
   4. letta.js: link()/linkSync() lock files -> writeFileSync(flag:"wx")
      Android SELinux denies hardlinks on app_data_file. Two sites.
-  5. node uv__close assert (core.c:646) -> skip fds <= 2 instead of abort
+  5. letta.js Android shell spawn sites:
+     5a. shell-shim shebang "#!/bin/sh" -> "#!/system/bin/sh" (subagent/CLI
+         shim; guarded by full template — hf-askpass helper left untouched)
+     5b. BashSession beta-tool spawn "/bin/bash" -> SHELL-aware
+         (0.32.x persistent shell; absent in 0.30.x, skipped)
+  6. node uv__close assert (core.c:646) -> skip fds <= 2 instead of abort
      The assert "fd > STDERR_FILENO" aborts node whenever libuv closes an
      fd that landed in a freed low slot (a stdio fd closed/reused during
      bootstrap). Resurfaced Aug 28 2026: after a Samsung update every
@@ -116,9 +121,34 @@ def main(rootfs):
                       'await writeFile15(targetPath, contents, { flag: "wx" });', 1)
         n += 1
     print(f"  letta.js: {n} link site(s) patched")
+
+    print("5. letta.js Android shell spawn sites")
+    # 5a. Shell-shim shebang: ensureLettaShimDir embeds `#!/bin/sh\nexec <cmd>`
+    #     as the shim body. Android has no /bin/sh at that path, so the shim
+    #     cannot be exec'd. Rewrite the full template (guard: the unrelated
+    #     hf-askpass helper is array-built and does not match).
+    SHIM_OLD = '#!/bin/sh\nexec '
+    SHIM_NEW = '#!/system/bin/sh\nexec '
+    m = s.count(SHIM_OLD)
+    if m:
+        s = s.replace(SHIM_OLD, SHIM_NEW)
+        print(f"  letta.js: {m} shell-shim shebang site(s) patched")
+    else:
+        already = s.count(SHIM_NEW)
+        print(f"  letta.js: 0 shebang sites found ({already} already /system/bin/sh)")
+    # 5b. Persistent-shell beta tool (0.32.x): BashSession spawns an absolute
+    #     /bin/bash directly, ignoring SHELL/PATH. Route through SHELL (the
+    #     launch script points it at the files/bin/bash wrapper). Guarded:
+    #     pattern is absent in 0.30.x and skipped.
+    BSESS_OLD = 'cp.spawn("/bin/bash", ["--noprofile", "--norc"]'
+    BSESS_NEW = 'cp.spawn(process.env.SHELL || "/bin/bash", ["--noprofile", "--norc"]'
+    if BSESS_OLD in s:
+        s = s.replace(BSESS_OLD, BSESS_NEW)
+        print("  letta.js: BashSession spawn -> SHELL-aware")
+
     open(letta, "wb").write(s.encode("utf-8", "surrogateescape"))
 
-    print("5. node uv__close assert -> skip fds <= 2")
+    print("6. node uv__close assert -> skip fds <= 2")
     # uv__close @ vaddr 0x1c2ec00; .text vaddr->file delta is 0x400000.
     # 1c2ec0c: cmp w0,#2 ; 1c2ec10: b.le 0x1c2ec58 (assert path)
     # Retarget b.le to 0x1c2ec4c (epilogue): 4d020054 -> ed010054.

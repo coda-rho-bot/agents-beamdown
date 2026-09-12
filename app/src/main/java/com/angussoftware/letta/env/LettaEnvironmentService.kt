@@ -149,6 +149,7 @@ class LettaEnvironmentService : Service() {
             "HOME" to File(rootfsDir, "root").absolutePath,
             "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
             "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
+            "SHELL" to File(File(filesDir, "bin"), "bash").absolutePath,
             "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
             "NODE_OPTIONS" to "--require ${File(filesDir, "dns-shim.js").absolutePath}",
             "UV_USE_IO_URING" to "0"
@@ -193,41 +194,70 @@ class LettaEnvironmentService : Service() {
         }
 
         // 3. Re-apply Android patches to the fresh letta.js (hardlink locks
-        //    are denied by SELinux on app_data_file). Mirror of patch #4 in
-        //    tools/rootfs-build/patch-binaries.py — keep both in sync.
-        //    (Kotlin replace patches ALL occurrences; the Python side uses
-        //    count=1 — both patterns are single-site in practice.)
-        val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
-        if (lettaJs.exists()) {
-            val s = lettaJs.readText()
-            var patched = 0
-            var out = s
-            if ("linkSync(candidatePath, targetPath);" in out) {
-                out = out.replace("linkSync(candidatePath, targetPath);",
-                    "writeFileSync4(targetPath, ownerToken, { flag: \"wx\" });")
-                patched++
-            }
-            if ("await link3(candidatePath, targetPath);" in out) {
-                out = out.replace("await link3(candidatePath, targetPath);",
-                    "await writeFile15(targetPath, contents, { flag: \"wx\" });")
-                patched++
-            }
-            if (patched > 0) {
-                lettaJs.writeText(out)
-                log("UPGRADE: re-applied $patched letta.js link() patch(es)")
-            } else {
-                log("UPGRADE: WARNING — 0 link() patch sites found in new letta.js; " +
-                    "lock-file hardlinks will fail under SELinux. Upstream code changed — " +
-                    "update the patch patterns in the service AND patch-binaries.py.")
-            }
-        } else {
-            log("UPGRADE: WARNING — letta.js not found after npm install")
+        //    are denied by SELinux on app_data_file). Mirror of patches #4 and
+        //    #5 in tools/rootfs-build/patch-binaries.py — keep both in sync.
+        val applied = applyLettaJsPatches(nodeModules)
+        if (applied == 0) {
+            log("UPGRADE: WARNING — 0 patch sites found in new letta.js; " +
+                "lock-file hardlinks will fail under SELinux. Upstream code changed — " +
+                "update the patch patterns in the service AND patch-binaries.py.")
         }
 
         val after = currentVersion()
         log("UPGRADE: $before -> $after")
         setStatus("upgraded to $after — restarting")
         updateNotification("Upgraded to $after — restarting")
+    }
+
+    /**
+     * Idempotent Android patches to letta.js. Mirror of patches #4/#5 in
+     * tools/rootfs-build/patch-binaries.py — keep both in sync. Returns the
+     * number of patch sites applied (0 = already patched OR upstream changed;
+     * callers that just ran npm warn on 0, restart-path callers do not).
+     *
+     *  - link()/linkSync() lock files -> writeFileSync(flag:"wx") — SELinux
+     *    denies hardlinks on app_data_file (2 sites).
+     *  - Shell-shim shebang "#!/bin/sh" -> "#!/system/bin/sh" — the subagent
+     *    `letta` shim is spawned via its interpreter line; /bin/sh does not
+     *    exist on the Android host (1 site, template-guarded).
+     *  - BashSession persistent-shell spawn "/bin/bash" -> SHELL-aware —
+     *    absolute /bin/bash does not exist on the host (1 site, 0.32.x only).
+     */
+    private fun applyLettaJsPatches(nodeModules: File): Int {
+        val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
+        if (!lettaJs.exists()) {
+            log("PATCH: letta.js not found")
+            return 0
+        }
+        val s = lettaJs.readText()
+        var patched = 0
+        var out = s
+        if ("linkSync(candidatePath, targetPath);" in out) {
+            out = out.replace("linkSync(candidatePath, targetPath);",
+                "writeFileSync4(targetPath, ownerToken, { flag: \"wx\" });")
+            patched++
+        }
+        if ("await link3(candidatePath, targetPath);" in out) {
+            out = out.replace("await link3(candidatePath, targetPath);",
+                "await writeFile15(targetPath, contents, { flag: \"wx\" });")
+            patched++
+        }
+        if ("#!/bin/sh\nexec " in out) {
+            out = out.replace("#!/bin/sh\nexec ", "#!/system/bin/sh\nexec ")
+            patched++
+        }
+        if ("cp.spawn(\"/bin/bash\", [\"--noprofile\", \"--norc\"]" in out) {
+            out = out.replace("cp.spawn(\"/bin/bash\", [\"--noprofile\", \"--norc\"]",
+                "cp.spawn(process.env.SHELL || \"/bin/bash\", [\"--noprofile\", \"--norc\"]")
+            patched++
+        }
+        if (patched > 0) {
+            lettaJs.writeText(out)
+            log("PATCH: applied $patched letta.js patch site(s)")
+        } else {
+            log("PATCH: letta.js already fully patched (or 0 sites matched)")
+        }
+        return patched
     }
 
     private fun runEnvironment() {
@@ -291,6 +321,11 @@ class LettaEnvironmentService : Service() {
         installSupportFiles(rootfsDir, libDir)
         sweepStaleListenerLocks(rootfsDir)
 
+        // Re-apply letta.js patches on every start: npm-upgraded installs
+        // (upgrade button) land unpatched until the NEXT upgrade, and the
+        // launcher/interpreter fixes are load-bearing for the Bash tool.
+        applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"))
+
         val libPath = libDir.absolutePath
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
 
@@ -314,6 +349,19 @@ class LettaEnvironmentService : Service() {
             "export HOME=${File(rootfsDir, "root").absolutePath}\n" +
             "export TMPDIR=${File(rootfsDir, "tmp").absolutePath}\n" +
             "export PATH=${bashDir.absolutePath}:/system/bin:/system/xbin\n" +
+            // SHELL: letta.js launcher resolution (selectAvailableShellLauncher /
+            // unixLaunchers) tries process.env.SHELL FIRST; without it the first
+            // candidate is an absolute "/bin/bash" that does not exist on the
+            // Android host and non-win32 selection returns launchers[0] with no
+            // fallback — every Bash tool call dies with ENOENT. Point SHELL at
+            // the files/bin/bash wrapper (Debian bash via the libdir loader chain).
+            "export SHELL=${bashDir.absolutePath}/bash\n" +
+            // LETTA_CODE_BIN: subagent spawning (resolveSubagentLauncher →
+            // resolveLettaInvocation) prefers this explicit binary; the defaults
+            // would otherwise try to re-exec process.execPath (libnode.so via the
+            // loader chain — cannot be re-spawned raw) or execute letta.js as a
+            // program (ENOEXEC on Android). The wrapper lives in files/bin/letta.
+            "export LETTA_CODE_BIN=${bashDir.absolutePath}/letta\n" +
             "export TERM=dumb\n" +
             "export LETTA_API_KEY=${apiKey()}\n" +
             "export LD_LIBRARY_PATH=$combinedPath\n" +
@@ -560,6 +608,39 @@ class LettaEnvironmentService : Service() {
         bash.writeText("#!/system/bin/sh\nexec $loaderFlag ${File(libDir, "libguestbash.so").absolutePath} \"$@\"\n")
         bash.setExecutable(true, false)
         log("bash wrapper installed")
+
+        // `letta` wrapper: launcher for letta-code itself. Subagent spawning and
+        // `letta` CLI re-invocations (LETTA_CODE_BIN) need a spawnable entry
+        // point; process.execPath is the loader chain (cannot be re-spawned raw)
+        // and letta.js is not directly executable on Android. Route through the
+        // same loader chain the server itself runs under, with the same env the
+        // launch script exports (self-contained: some spawn paths scrub env).
+        val lettaJsPath = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
+        val lettaBin = File(binDir, "letta")
+        lettaBin.writeText(
+            "#!/system/bin/sh\n" +
+            "export HOME=\"\${HOME:-${File(rootfsDir, "root").absolutePath}}\"\n" +
+            "export TMPDIR=\"\${TMPDIR:-${File(rootfsDir, "tmp").absolutePath}}\"\n" +
+            "export PATH=${binDir.absolutePath}:/system/bin:/system/xbin\n" +
+            "export NODE_OPTIONS=\"--require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
+            "export UV_USE_IO_URING=0\n" +
+            "exec $loaderFlag ${File(libDir, "libnode.so").absolutePath} \"$lettaJsPath\" \"$@\"\n"
+        )
+        lettaBin.setExecutable(true, false)
+        log("letta wrapper installed")
+
+        // dx: agent-facing wrapper for running commands inside the proot
+        // rootfs (apt, git, …) plus Android system tools via the /system
+        // bind-mount (pm, am, settings). Source of truth: tools/on-device/dx.sh
+        // — keep in sync. Always rewrite: the script embeds no absolute
+        // per-install paths (DX_FILES auto-detects) but refresh keeps it
+        // current when the asset ships updates.
+        val dx = File(binDir, "dx")
+        assets.open("dx.sh").use { input ->
+            dx.outputStream().use { output -> input.copyTo(output) }
+        }
+        dx.setExecutable(true, false)
+        log("dx wrapper installed")
 
         // ripgrep is statically linked (musl) — execve from app_data works as-is.
 
