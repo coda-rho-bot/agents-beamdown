@@ -24,6 +24,13 @@ class MainActivity : android.app.Activity() {
         private val PREF_KEY = LettaEnvironmentService.PREF_KEY
         private val PREF_ENV = LettaEnvironmentService.PREF_ENV
         private val DEFAULT_ENV = LettaEnvironmentService.DEFAULT_ENV
+        // Prefix + length + charset — a bare startsWith accepted the literal
+        // string "sk-let-" (review task_92 #2).
+        private val KEY_REGEX = Regex("^sk-let-[A-Za-z0-9_-]{20,}$")
+        // Env name is interpolated into a shell script — unquoted spaces broke
+        // launch with an opaque exit 1 (review task_92 #4). Restricted charset
+        // is the real fix; quoting in the service is defense-in-depth.
+        private val ENV_REGEX = Regex("^[a-z0-9][a-z0-9-_]{0,63}$")
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -78,17 +85,25 @@ class MainActivity : android.app.Activity() {
             setOnClickListener {
                 val key = keyField.text.toString().trim()
                 val env = envField.text.toString().trim().ifEmpty { DEFAULT_ENV }
-                if (!key.startsWith("sk-let-")) {
-                    Toast.makeText(this@MainActivity, "Key should start with sk-let-", Toast.LENGTH_LONG).show()
+                if (!KEY_REGEX.matches(key)) {
+                    Toast.makeText(this@MainActivity, "Key must look like sk-let-… (letters/digits/dashes, 20+ chars)", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                if (!ENV_REGEX.matches(env)) {
+                    Toast.makeText(this@MainActivity, "Environment name: lowercase letters, digits, - and _ only (max 64 chars)", Toast.LENGTH_LONG).show()
                     return@setOnClickListener
                 }
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString(PREF_KEY, key)
                     .putString(PREF_ENV, env)
                     .apply()
-                // wipe any prior runtime state so a re-key restarts clean
-                File(filesDir, "launch-server.sh").delete()
-                File(filesDir, "server.log").delete()
+                // Re-key/rename with a live server: stop it FIRST so the new
+                // config actually takes effect (old flow left the old-key
+                // server running and just showed the new masked key — review
+                // task_92 #1 / task_93 #3). Keep server.log for diagnosis;
+                // the service rewrites launch-server.sh on every start, so
+                // deleting it was cosmetic.
+                stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java))
                 ensureRuntimePermissions()
                 showMain()
                 startEnvironment()
