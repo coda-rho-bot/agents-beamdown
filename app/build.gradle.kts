@@ -11,8 +11,8 @@ android {
         applicationId = "com.angussoftware.letta.env"
         minSdk = 26
         targetSdk = 28
-        versionCode = 8
-        versionName = "0.2.6"
+        versionCode = 9
+        versionName = "0.2.7"
     }
 
     buildTypes {
@@ -34,6 +34,14 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+    }
+
+    // Tarball assets must stay uncompressed in the APK: assets.open()
+    // streams raw asset bytes, and double-compression (deflate over gzip)
+    // bloats the APK and slows the one-shot staging copy. Same treatment
+    // rootfs.tar relies on (uncompressed .tar).
+    androidResources {
+        noCompress += listOf("tar", "gz")
     }
 }
 

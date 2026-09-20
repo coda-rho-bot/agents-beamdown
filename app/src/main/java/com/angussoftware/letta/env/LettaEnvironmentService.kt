@@ -642,6 +642,36 @@ class LettaEnvironmentService : Service() {
         dx.setExecutable(true, false)
         log("dx wrapper installed")
 
+        // git: letta-code 0.32.x requires a spawnable `git` on PATH for
+        // git-based MemFS sync. The rootfs never shipped git, so every turn
+        // died with "spawn git ENOENT". The wrapper runs Debian git INSIDE
+        // the proot rootfs (payload install on first run, cwd mapped to
+        // /host, GIT_* env forwarded). Source of truth:
+        // app/src/main/assets/git.sh — keep in sync with the asset. Always
+        // rewrite, same policy as dx above.
+        val git = File(binDir, "git")
+        assets.open("git.sh").use { input ->
+            git.outputStream().use { output -> input.copyTo(output) }
+        }
+        git.setExecutable(true, false)
+        log("git wrapper installed")
+
+        // git payload tarballs staged to the filesDir ROOT under their exact
+        // asset names — the wrapper looks for $FILES/git-arm64.tar.gz and
+        // $FILES/proot-aarch64.tar.gz (offline first-run install; falls back
+        // to the GitHub plugins-v1 release URLs when absent). proot is staged
+        // too so the wrapper shares dx's plugin install without a download.
+        // Large (31.5MB git payload): copy once per install, like rootfs.tar.
+        for (payloadName in listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz")) {
+            val payload = File(filesDir, payloadName)
+            if (!payload.exists()) {
+                assets.open(payloadName).use { input ->
+                    payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
+                }
+                log("$payloadName staged to filesDir")
+            }
+        }
+
         // ripgrep is statically linked (musl) — execve from app_data works as-is.
 
         // native addons: symlink into libdir (dlopen'd with PROT_EXEC)

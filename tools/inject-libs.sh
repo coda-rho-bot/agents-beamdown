@@ -22,6 +22,14 @@ cp "$R/usr/bin/bash"                                 "$D/libguestbash.so"
 cp "$R/usr/bin/true"                                 "$D/libtrue.so"
 cp "$(dirname "$0")/libsigsys.so"                    "$D/libsigsys.so"
 
+# git payloads: AGP's asset-merge gunzips *.gz assets and strips the suffix
+# (git-arm64.tar.gz ships as assets/git-arm64.tar, decompressed). Re-inject
+# the byte-exact .gz files here — the Kotlin staging code and the git wrapper
+# both address them by their exact .gz names.
+mkdir -p "$STAGE/assets"
+cp "$(dirname "$0")/../app/src/main/assets/git-arm64.tar.gz"       "$STAGE/assets/"
+cp "$(dirname "$0")/../app/src/main/assets/proot-aarch64.tar.gz"  "$STAGE/assets/"
+
 python3 "$(dirname "$0")/inject.py" "$APK" "$STAGE"
 "$BT/zipalign" -f 4 "$APK" "$APK.aligned" && mv "$APK.aligned" "$APK"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android "$APK"
