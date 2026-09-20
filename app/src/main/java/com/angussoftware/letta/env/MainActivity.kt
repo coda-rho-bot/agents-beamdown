@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -457,6 +458,41 @@ class MainActivity : android.app.Activity() {
         }
         if (wanted.isNotEmpty()) {
             requestPermissions(wanted.toTypedArray(), 1)
+        }
+    }
+
+    /**
+     * True when the app is exempt from battery optimization (Samsung: battery
+     * setting "Unrestricted"). When false, Android will suspend the app under
+     * memory/battery pressure — which killed the server overnight twice
+     * (Aug 28, Sep 20 2026), leaving the environment offline for hours.
+     */
+    private fun isBatteryUnrestricted(): Boolean {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** One-tap path to the system exemption dialog for THIS app. */
+    private fun requestBatteryExemption() {
+        try {
+            val intent = Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            // Some OEM builds block the direct intent — fall back to the
+            // full battery-optimization list where the user finds the app.
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                // Last resort: the app's own details page (Samsung's
+                // battery setting lives under app info).
+                startActivity(Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ))
+            }
         }
     }
 
