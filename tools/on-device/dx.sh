@@ -55,24 +55,49 @@ if [ ! -f "$ROOTFS/etc/resolv.conf" ] || ! grep -q nameserver "$ROOTFS/etc/resol
 fi
 # PATH for login-less guests
 if [ ! -d "$ROOTFS/usr/local/bin" ]; then mkdir -p "$ROOTFS/usr/local/bin" 2>/dev/null; fi
+# Writable TMPDIR inside the guest (rootfs /tmp is app-writable; /tmp may be
+# shadowed by an OS tmpfs from the host on some devices — guest /tmp2 is ours).
+if [ ! -d "$ROOTFS/tmp2" ]; then mkdir -p "$ROOTFS/tmp2" && chmod 1777 "$ROOTFS/tmp2" 2>/dev/null; fi
+# liblink2copy.so: hardlink->copy fallback shim (SELinux denies hardlinks in
+# app data; dpkg status-old backup and dpkg-deb extraction need it).
+# Installs on first use from the plugins release; no-op once present.
+L2C_DIR="$PLUGINS/link2copy"
+L2C_SO="$L2C_DIR/liblink2copy.so"
+if [ ! -f "$L2C_SO" ]; then
+    mkdir -p "$L2C_DIR" 2>/dev/null
+    curl -sSL --max-time 60 -o "$L2C_SO.tmp" "${DX_L2C_URL:-https://github.com/coda-rho-bot/letta-environment-android/releases/download/plugins-v1/liblink2copy.so}" \
+        && mv "$L2C_SO.tmp" "$L2C_SO" || rm -f "$L2C_SO.tmp"
+fi
+# proot binds /system; the shim path must be absolute host-style so proot
+# passes it through untranslated for ld.so.
+L2C_PRELOAD=""
+[ -f "$L2C_SO" ] && L2C_PRELOAD="$DX_FILES/plugins/link2copy/liblink2copy.so"
 
 export LD_LIBRARY_PATH="$PLUGINS/proot-aarch64/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PROOT_TMP_DIR="$DX_FILES/tmp"
 export PROOT_LOADER="$PLUGINS/proot-aarch64/libexec/proot/loader"
 export PROOT_LOADER2="$PLUGINS/proot-aarch64/libexec/proot/loader"
 
+# -0 : fake root (dpkg/apt demand uid 0; proot translates back to the app uid)
+# LD_PRELOAD of the shim applies to every guest process incl. children.
+# (/usr/bin/env -i ... runs INSIDE the guest — it's the guest's env binary.)
+
 # --- convenience: -c 'cmd' ---------------------------------------------------------
 if [ "${1:-}" = "-c" ]; then
     shift
-    exec "$PROOT" -R "$ROOTFS" -b /system /usr/bin/env -i \
+    exec "$PROOT" -0 -R "$ROOTFS" -b /system /usr/bin/env -i \
         TERM=dumb \
         PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/system/bin \
         HOME=/root \
+        TMPDIR=/tmp2 \
+        ${L2C_PRELOAD:+LD_PRELOAD=$L2C_PRELOAD} \
         /bin/bash -c "$*"
 fi
 
-exec "$PROOT" -R "$ROOTFS" -b /system /usr/bin/env -i \
+exec "$PROOT" -0 -R "$ROOTFS" -b /system /usr/bin/env -i \
     TERM=dumb \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/system/bin \
     HOME=/root \
+    TMPDIR=/tmp2 \
+    ${L2C_PRELOAD:+LD_PRELOAD=$L2C_PRELOAD} \
     "$@"
