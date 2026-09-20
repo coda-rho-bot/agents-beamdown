@@ -85,7 +85,7 @@ export PROOT_LOADER2="$PLUGINS/proot-aarch64/libexec/proot/loader"
 # --- convenience: -c 'cmd' ---------------------------------------------------------
 if [ "${1:-}" = "-c" ]; then
     shift
-    exec "$PROOT" -0 -R "$ROOTFS" -b /system /usr/bin/env -i \
+    exec "$PROOT" -0 -R "$ROOTFS" -b /system -b /sdcard /usr/bin/env -i \
         TERM=dumb \
         PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/system/bin \
         HOME=/root \
@@ -94,7 +94,7 @@ if [ "${1:-}" = "-c" ]; then
         /bin/bash -c "$*"
 fi
 
-exec "$PROOT" -0 -R "$ROOTFS" -b /system /usr/bin/env -i \
+exec "$PROOT" -0 -R "$ROOTFS" -b /system -b /sdcard /usr/bin/env -i \
     TERM=dumb \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/system/bin \
     HOME=/root \
