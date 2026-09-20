@@ -12,6 +12,12 @@
          (Scoped-storage READ_MEDIA_* perms are NOT needed at this target.) -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- Battery exemption request (ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS):
+         the server must survive overnight suspension — Android battery
+         optimization killed the process tree on Aug 28 and again Sep 20
+         (server offline ~7h, stale cloud connection). targetSdk 28 keeps
+         this permission usable on modern Android. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:label="Letta Environment"

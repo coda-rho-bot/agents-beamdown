@@ -2,10 +2,12 @@ package com.angussoftware.letta.env
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.text.InputType
 import android.view.Gravity
 import android.widget.Button
@@ -28,6 +30,7 @@ class MainActivity : android.app.Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var statusView: TextView
+    private lateinit var batteryWarningView: TextView
     private lateinit var logView: TextView
     private val refresh = object : Runnable {
         override fun run() {
@@ -109,6 +112,18 @@ class MainActivity : android.app.Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         statusView = TextView(this).apply { textSize = 16f }
+        // Battery warning banner: shown/hidden by renderStatus() on every
+        // refresh (2s cadence) so it reacts immediately when the user
+        // changes the setting from the system dialog.
+        batteryWarningView = TextView(this).apply {
+            textSize = 14f
+            setTextColor(0xFFB30000.toInt())
+            setPadding(0, pad / 2, 0, pad / 2)
+            text = "⚠ Battery optimization is ON — Android will kill this app overnight. Tap here to set it to Unrestricted, then confirm in the system dialog."
+            setOnClickListener {
+                requestBatteryExemption()
+            }
+        }
         logView = TextView(this).apply {
             textSize = 11f
             typeface = android.graphics.Typeface.MONOSPACE
@@ -147,6 +162,7 @@ class MainActivity : android.app.Activity() {
             }
         }
         root.addView(statusView)
+        root.addView(batteryWarningView)
         root.addView(startBtn)
         root.addView(stopBtn)
         root.addView(rekeyBtn)
@@ -179,6 +195,41 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    /**
+     * True when the app is exempt from battery optimization (Samsung: battery
+     * setting "Unrestricted"). When false, Android will suspend the app under
+     * memory/battery pressure — which killed the server overnight twice
+     * (Aug 28, Sep 20 2026), leaving the environment offline for hours.
+     */
+    private fun isBatteryUnrestricted(): Boolean {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** One-tap path to the system exemption dialog for THIS app. */
+    private fun requestBatteryExemption() {
+        try {
+            val intent = Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            // Some OEM builds block the direct intent — fall back to the
+            // full battery-optimization list where the user finds the app.
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                // Last resort: the app's own details page (Samsung's
+                // battery setting lives under app info).
+                startActivity(Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ))
+            }
+        }
+    }
+
     private fun startEnvironment() {
         startForegroundService(Intent(this, LettaEnvironmentService::class.java))
     }
@@ -201,6 +252,10 @@ class MainActivity : android.app.Activity() {
         val logFile = File(filesDir, "server.log")
         val statusText = if (statusFile.exists()) statusFile.readText() else "Not started"
         statusView.text = "$statusText\nkey: ${maskKey(prefs.getString(PREF_KEY, ""))}"
+        // Battery warning visibility re-evaluated every refresh tick (2s):
+        // clears itself the moment the exemption is granted, no restart needed.
+        batteryWarningView.visibility =
+            if (isBatteryUnrestricted()) TextView.GONE else TextView.VISIBLE
         logView.text = if (logFile.exists()) {
             logFile.readLines().takeLast(40).joinToString("\n")
         } else ""
