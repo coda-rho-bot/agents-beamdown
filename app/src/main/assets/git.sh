@@ -54,9 +54,15 @@ if [ ! -x "$PROOT" ]; then
 fi
 
 # --- git payload: staged tarball first, download fallback ------------------------
+# Self-heal: a corrupt staged tarball (interrupted copy, bit rot) is removed
+# on extract failure so the next invocation falls through to the download
+# path instead of failing offline forever.
 if [ ! -x "$GUEST_GIT" ]; then
     if [ -f "$DX_FILES/git-arm64.tar.gz" ]; then
-        tar -xzf "$DX_FILES/git-arm64.tar.gz" -C "$ROOTFS" || die "git payload extract failed"
+        if ! tar -xzf "$DX_FILES/git-arm64.tar.gz" -C "$ROOTFS"; then
+            rm -f "$DX_FILES/git-arm64.tar.gz"
+            die "git payload corrupt — removed staged copy, retry will download"
+        fi
     else
         TARBALL="$DX_FILES/tmp/git-arm64.tar.gz"
         curl -sSL --max-time 300 -o "$TARBALL" \

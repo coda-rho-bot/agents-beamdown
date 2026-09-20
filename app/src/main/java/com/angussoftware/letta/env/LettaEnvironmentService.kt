@@ -662,13 +662,19 @@ class LettaEnvironmentService : Service() {
         // to the GitHub plugins-v1 release URLs when absent). proot is staged
         // too so the wrapper shares dx's plugin install without a download.
         // Large (31.5MB git payload): copy once per install, like rootfs.tar.
+        // Partial-copy self-heal: rootfs uses a marker+verify pattern for the
+        // same class of problem; here a size check is enough (assets are
+        // immutable, so length mismatch = interrupted copy). Rewrite from the
+        // asset on mismatch — no manual cleanup path needed.
         for (payloadName in listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz")) {
             val payload = File(filesDir, payloadName)
-            if (!payload.exists()) {
+            val assetSize = assets.open(payloadName).use { it.available().toLong() }
+            if (!payload.exists() || payload.length() != assetSize) {
+                if (payload.exists()) payload.delete()
                 assets.open(payloadName).use { input ->
                     payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
                 }
-                log("$payloadName staged to filesDir")
+                log("$payloadName staged to filesDir (${assetSize} bytes)")
             }
         }
 
