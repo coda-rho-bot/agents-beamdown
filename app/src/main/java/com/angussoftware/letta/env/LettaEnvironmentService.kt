@@ -50,10 +50,24 @@ class LettaEnvironmentService : Service() {
         private const val CHANNEL_ID = "letta-env-status"
         private const val NOTIFICATION_ID = 42
         @Volatile private var proc: Process? = null
-        private val starting = java.util.concurrent.atomic.AtomicBoolean(false)
+        // Lifecycle state. Values: idle -> starting -> running -> stopping.
+        // The worker holds "starting"/"running" ONLY while its process lives;
+        // it returns to idle in the worker's finally block. Intent handlers
+        // (start/upgrade/rekey) CAS from a state they can actually occupy —
+        // see onStartCommand. Replaces the old single `starting` boolean,
+        // which the worker held for the ENTIRE server lifetime (waitFor
+        // blocks in runEnvironment), making Upgrade a silent no-op whenever
+        // the server was up (adversarial review Sep 20, finding task_93 #1).
+        private val lifecycle = java.util.concurrent.atomic.AtomicReference(State.IDLE)
+        private enum class State { IDLE, STARTING, RUNNING, STOPPING }
+        // Pending operation set while the server runs; the worker loop acts
+        // on it after the current process exits (see worker body).
+        private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
+        private enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
+        const val ACTION_RESTART = "com.angussoftware.letta.env.action.RESTART"
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
     }
@@ -72,46 +86,156 @@ class LettaEnvironmentService : Service() {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
-        if (intent?.action == ACTION_UPGRADE) {
-            if (!starting.compareAndSet(false, true)) {
-                log("upgrade requested while busy — ignoring")
-                return START_STICKY
+        when (intent?.action) {
+            ACTION_UPGRADE -> handleUpgradeIntent()
+            ACTION_RESTART -> handleRestartIntent()
+            else -> handleStartIntent()
+        }
+        return START_STICKY
+    }
+
+    /**
+     * Start when idle. If already running: schedule a restart ONLY when the
+     * configuration changed (re-key / rename — MainActivity rewrites prefs
+     * before sending this); otherwise it's a stray double-tap — re-assert the
+     * current state instead of corrupting it (old bug: setStatus("starting")
+     * fired BEFORE the guard, leaving status/notification stuck at "starting"
+     * forever while the server ran fine — review task_93 #2).
+     */
+    private fun handleStartIntent() {
+        when (lifecycle.get()) {
+            State.IDLE -> {
+                if (!lifecycle.compareAndSet(State.IDLE, State.STARTING)) return handleStartIntent()
+                setStatus("starting")
+                spawnWorker()
             }
-            worker = Thread {
-                try {
-                    upgradeLetta()
-                    runEnvironment()
-                } catch (t: Throwable) {
-                    log("UPGRADE FATAL: ${t.message}")
-                    setStatus("upgrade failed: ${t.message}")
-                    updateNotification("Upgrade failed")
-                } finally {
-                    starting.set(false)
+            State.RUNNING, State.STARTING -> {
+                if (configChanged()) {
+                    log("config changed — restarting to apply new key/env name")
+                    pendingOp.set(PendingOp.RESTART)
+                    // Ask the running server to exit; the worker loop relaunches
+                    // with the fresh prefs.
+                    try { proc?.destroy() } catch (_: Exception) {}
+                } else {
+                    log("start requested while already ${lifecycle.get().name.lowercase()} — ignoring")
+                    // Re-assert real state so status.txt/notification stay truthful.
+                    reassertState()
                 }
-            }.also { it.start() }
-            return START_STICKY
+            }
+            State.STOPPING -> log("start requested while stopping — ignoring")
         }
+    }
 
-        setStatus("starting")
-
-        if (!starting.compareAndSet(false, true)) {
-            log("start requested while already starting/running — ignoring")
-            return START_STICKY
+    /**
+     * Upgrade: when idle, run immediately. When running, mark pending and stop
+     * the server — the worker loop performs upgrade + relaunch after exit
+     * (old bug: the entire flow was gated on a flag held for the server's
+     * whole lifetime, so Upgrade while running was ALWAYS a silent no-op —
+     * review task_93 #1).
+     */
+    private fun handleUpgradeIntent() {
+        when (lifecycle.get()) {
+            State.IDLE -> {
+                if (!lifecycle.compareAndSet(State.IDLE, State.STARTING)) return handleUpgradeIntent()
+                setStatus("upgrading letta-code")
+                spawnWorker(upgradeFirst = true)
+            }
+            State.RUNNING, State.STARTING -> {
+                if (pendingOp.compareAndSet(null, PendingOp.UPGRADE)) {
+                    log("upgrade requested while running — stopping server; upgrade follows")
+                    setStatus("stopping for upgrade")
+                    try { proc?.destroy() } catch (_: Exception) {}
+                } else {
+                    log("upgrade already pending — ignoring")
+                }
+            }
+            State.STOPPING -> log("upgrade requested while stopping — ignoring")
         }
+    }
 
+    /** Explicit restart (used by rekey flow via start intent; kept for future UI). */
+    private fun handleRestartIntent() = handleStartIntent()
+
+    /**
+     * Worker: runs the environment; on process exit, drains any pending
+     * operation (upgrade / restart) in a loop until none remain, then goes
+     * idle. All state transitions originate here or in the intent handlers
+     * via CAS — no path leaves lifecycle stuck.
+     */
+    private fun spawnWorker(upgradeFirst: Boolean = false) {
         worker = Thread {
+            var doUpgrade = upgradeFirst
             try {
-                runEnvironment()
-            } catch (t: Throwable) {
-                log("FATAL: ${t.message}")
-                setStatus("failed: ${t.message}")
-                updateNotification("Failed")
+                while (true) {
+                    if (doUpgrade) {
+                        try {
+                            upgradeLetta()
+                        } catch (t: Throwable) {
+                            log("UPGRADE FATAL: ${t.message}")
+                            setStatus("upgrade failed: ${t.message ?: t.javaClass.simpleName}")
+                            updateNotification("Upgrade failed")
+                        }
+                    }
+                    try {
+                        runEnvironment()
+                    } catch (t: Throwable) {
+                        log("FATAL: ${t.message}")
+                        setStatus("failed: ${t.message ?: t.javaClass.simpleName}")
+                        updateNotification("Failed")
+                    }
+                    // Process exited. Drain pending op, else idle.
+                    when (pendingOp.getAndSet(null)) {
+                        PendingOp.UPGRADE -> {
+                            log("pending upgrade — running it now")
+                            doUpgrade = true
+                            continue
+                        }
+                        PendingOp.RESTART -> {
+                            log("pending restart — relaunching with current config")
+                            doUpgrade = false
+                            continue
+                        }
+                        // Review #18 F2 (Angus): user Stop during a pending op
+                        // must NOT relaunch — the drain loop treats SHUTDOWN
+                        // as terminal and the worker exits to idle.
+                        PendingOp.SHUTDOWN -> {
+                            log("shutdown requested — not relaunching")
+                            break
+                        }
+                        null -> break
+                    }
+                }
             } finally {
-                starting.set(false)
+                lifecycle.set(State.IDLE)
             }
         }.also { it.start() }
+    }
 
-        return START_STICKY
+    /**
+     * True when prefs (API key / env name) differ from what the RUNNING server
+     * was launched with. The launch snapshot is written by runEnvironment().
+     */
+    private fun configChanged(): Boolean {
+        val snap = File(filesDir, ".launch-config")
+        if (!snap.exists()) return true
+        val expected = "${apiKey()}\n${envName()}"
+        return snap.readText() != expected
+    }
+
+    /** Rewrite status.txt + notification from process reality, not intent history. */
+    private fun reassertState() {
+        val alive = proc?.isAlive == true
+        val statusFile = File(filesDir, "status.txt")
+        val current = if (statusFile.exists()) statusFile.readText() else ""
+        if (!alive) return // worker will transition states momentarily
+        if (!current.contains("online") && !current.contains("registered")) {
+            // Unknown-but-alive: the tailer's string matching may have missed
+            // upstream log wording; state the provable fact.
+            setStatus("running (process alive)")
+            updateNotification("Running — ${envName()}")
+        } else {
+            updateNotification("Online — ${envName()}")
+        }
     }
 
     /**
@@ -367,7 +491,7 @@ class LettaEnvironmentService : Service() {
             "export LD_LIBRARY_PATH=$combinedPath\n" +
             "export NODE_OPTIONS=\"--require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
             "export UV_USE_IO_URING=0\n" +
-            "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name ${envName()} --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
+            "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name '${envName()}' --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
         )
         val stdinFile = File(filesDir, "stdin.txt")
         if (!stdinFile.exists()) stdinFile.writeText("")
@@ -375,15 +499,32 @@ class LettaEnvironmentService : Service() {
 
         val pb = ProcessBuilder(launchScript.absolutePath)
 
+        // Snapshot the config this server launches with: re-key / rename while
+        // running must trigger a restart (configChanged), not a silent ignore.
+        File(filesDir, ".launch-config").writeText("${apiKey()}\n${envName()}")
+
         val p = pb.start()
         proc = p
+        lifecycle.set(State.RUNNING)
+        // Review #18 F1 (Angus): an Upgrade/Restart intent that arrived during
+        // STARTING saw proc == null — its destroy() was a no-op and the op sat
+        // pending until the next natural exit (hours later). Re-check NOW that
+        // the process exists, so the pending op takes effect immediately.
+        if (pendingOp.get() != null && pendingOp.get() != PendingOp.SHUTDOWN) {
+            log("pending operation present at launch — stopping server to drain it")
+            try { p.destroy() } catch (_: Exception) {}
+        }
         log("Process started, streaming output (via server-stdout.log)...")
 
         // Output goes to a file (valid fd for the child); tail it for status.
+        // NOTE: tailer binds to THIS process (local val) — the old loop read
+        // the shared `proc` var, so an upgrade's proc=null left the stale
+        // tailer alive forever, double-appending once the new launch truncated
+        // server-stdout.log past its offset (review task_93 #9).
         val outLogFile = java.io.File(filesDir, "server-stdout.log")
         val tailer = Thread {
             var pos = 0L
-            while (proc?.isAlive != false) {
+            while (p.isAlive) {
                 try {
                     if (outLogFile.length() > pos) {
                         java.io.RandomAccessFile(outLogFile, "r").use { raf ->
@@ -419,8 +560,18 @@ class LettaEnvironmentService : Service() {
 
         val code = p.waitFor()
         log("letta server exited: $code")
-        setStatus("exited: $code")
-        updateNotification("Stopped (exit $code)")
+        // Don't overwrite a pending-op status ("stopping for upgrade") with a
+        // bare exit code the worker is about to supersede; label user-initiated
+        // stops distinctly from crashes (review task_93 #5, partially).
+        if (pendingOp.get() != null) {
+            log("exit $code superseded by pending operation")
+        } else if (code >= 128) {
+            setStatus("crashed (signal ${code - 128})")
+            updateNotification("Crashed — exit $code")
+        } else {
+            setStatus("exited: $code")
+            updateNotification("Stopped (exit $code)")
+        }
     }
 
     /** In-process mmap-exec matrix: can the ART runtime dlopen exec-mapped files? */
@@ -798,8 +949,15 @@ class LettaEnvironmentService : Service() {
     }
 
     override fun onDestroy() {
-        proc?.destroy()
-        worker?.interrupt()
+        // Review #18 F2/F3 (Angus): Stop must be terminal. Set SHUTDOWN FIRST
+        // so the worker's drain loop cannot relaunch (a pending UPGRADE used
+        // to resurrect the server the user just stopped), and mark STOPPING
+        // so lifecycle reflects reality between here and the worker's finally.
+        pendingOp.set(PendingOp.SHUTDOWN)
+        lifecycle.set(State.STOPPING)
+        setStatus("stopped (by user)")
+        try { proc?.destroy() } catch (_: Exception) {}
+        worker?.interrupt() // advisory: waitFor is not interruptible
         super.onDestroy()
     }
 }
