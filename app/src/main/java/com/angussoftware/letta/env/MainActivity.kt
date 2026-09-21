@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -419,20 +420,17 @@ class MainActivity : android.app.Activity() {
             )
             startActivity(intent)
         } catch (e: Exception) {
+            // Some OEM builds block the direct intent — fall back to the
+            // full battery-optimization list where the user finds the app.
             try {
                 startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (e2: Exception) {
-                try {
-                    startActivity(Intent(
-                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:$packageName")
-                    ))
-                } catch (e3: Exception) {
-                    // All three blocked (aggressive OEM): tell the user where to go.
-                    Toast.makeText(this,
-                        "Couldn't open the exemption screen — exempt \"Letta Environment\" in Settings → Apps → Battery",
-                        Toast.LENGTH_LONG).show()
-                }
+                // Last resort: the app's own details page (Samsung's
+                // battery setting lives under app info).
+                startActivity(Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ))
             }
         }
     }
