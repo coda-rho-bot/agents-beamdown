@@ -259,7 +259,7 @@ class MainActivity : android.app.Activity() {
         batteryBanner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
-                setColor((if (true) C.error else C.error)) // tinted below by state
+                setColor(0x26F87171.toInt()) // translucent error tint; renderStatus recolors per mode
                 cornerRadius = dp(12).toFloat()
             }
             minimumHeight = dp(48)
@@ -474,19 +474,25 @@ class MainActivity : android.app.Activity() {
         handler.removeCallbacks(refresh)
     }
 
-    /** Map status.txt state string to (color, label). */
-    private fun stateOf(raw: String): Pair<Int, String> = when {
-        raw.contains("online") -> C.ok to "Online"
-        raw.contains("registered") -> C.ok to "Registered"
-        raw.contains("registering") -> C.warn to "Registering…"
-        raw.contains("starting") -> C.warn to "Starting…"
-        raw.contains("extracting") -> C.warn to "Extracting rootfs…"
-        raw.contains("upgrading") -> C.warn to "Upgrading…"
-        raw.contains("crashed") -> C.error to "Crashed"
-        raw.contains("failed") -> C.error to "Failed"
-        raw.contains("exited") -> C.textSecondary to "Stopped"
-        raw.contains("stopping") -> C.textSecondary to "Stopping…"
-        else -> C.textSecondary to raw.removePrefix("state=").take(28).ifEmpty { "Not started" }
+    /** Map status.txt content to (color, label) — parse the state= LINE, not the
+     *  whole file (review #19 F1: env= line leaked into unknown-state labels). */
+    private fun stateOf(raw: String): Pair<Int, String> {
+        val stateLine = raw.lineSequence().firstOrNull { it.startsWith("state=") }
+            ?.removePrefix("state=")?.trim() ?: ""
+        return when {
+            stateLine.contains("online") -> C.ok to "Online"
+            stateLine.contains("registered") -> C.ok to "Registered"
+            stateLine.contains("registering") -> C.warn to "Registering…"
+            stateLine.contains("starting") -> C.warn to "Starting…"
+            stateLine.contains("extracting") -> C.warn to "Extracting rootfs…"
+            stateLine.contains("upgrading") -> C.warn to "Upgrading…"
+            stateLine.contains("crashed") -> C.error to "Crashed"
+            stateLine.contains("failed") -> C.error to "Failed"
+            stateLine.contains("exited") -> C.textSecondary to "Stopped"
+            stateLine.contains("stopped (by user)") -> C.textSecondary to "Stopped"
+            stateLine.contains("stopping") -> C.textSecondary to "Stopping…"
+            else -> C.textSecondary to stateLine.take(28).ifEmpty { "Not started" }
+        }
     }
 
     private fun renderStatus() {
@@ -508,7 +514,12 @@ class MainActivity : android.app.Activity() {
             // Battery banner: re-evaluated each tick; clears itself when granted.
             batteryBanner.visibility =
                 if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
-            (batteryBanner.background as? GradientDrawable)?.setColor(0x26F87171.toInt())
+            // Review #19 N3: solid error-tinted bg in light mode (white text
+            // on 15%-alpha red was unreadable); translucent in dark.
+            (batteryBanner.background as? GradientDrawable)?.setColor(
+                if (isDark()) 0x26F87171.toInt() else 0xFF991B1B.toInt())
+            batteryBannerText.setTextColor(
+                if (isDark()) 0xFFFECACA.toInt() else Color.WHITE)
 
             if (logExpanded) {
                 val tail = if (logFile.exists()) {
