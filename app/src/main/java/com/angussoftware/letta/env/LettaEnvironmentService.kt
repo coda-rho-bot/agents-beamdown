@@ -63,7 +63,7 @@ class LettaEnvironmentService : Service() {
         // Pending operation set while the server runs; the worker loop acts
         // on it after the current process exits (see worker body).
         private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
-        private enum class PendingOp { UPGRADE, RESTART }
+        private enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
@@ -194,6 +194,13 @@ class LettaEnvironmentService : Service() {
                             log("pending restart — relaunching with current config")
                             doUpgrade = false
                             continue
+                        }
+                        // Review #18 F2 (Angus): user Stop during a pending op
+                        // must NOT relaunch — the drain loop treats SHUTDOWN
+                        // as terminal and the worker exits to idle.
+                        PendingOp.SHUTDOWN -> {
+                            log("shutdown requested — not relaunching")
+                            break
                         }
                         null -> break
                     }
@@ -499,6 +506,14 @@ class LettaEnvironmentService : Service() {
         val p = pb.start()
         proc = p
         lifecycle.set(State.RUNNING)
+        // Review #18 F1 (Angus): an Upgrade/Restart intent that arrived during
+        // STARTING saw proc == null — its destroy() was a no-op and the op sat
+        // pending until the next natural exit (hours later). Re-check NOW that
+        // the process exists, so the pending op takes effect immediately.
+        if (pendingOp.get() != null && pendingOp.get() != PendingOp.SHUTDOWN) {
+            log("pending operation present at launch — stopping server to drain it")
+            try { p.destroy() } catch (_: Exception) {}
+        }
         log("Process started, streaming output (via server-stdout.log)...")
 
         // Output goes to a file (valid fd for the child); tail it for status.
@@ -928,8 +943,15 @@ class LettaEnvironmentService : Service() {
     }
 
     override fun onDestroy() {
-        proc?.destroy()
-        worker?.interrupt()
+        // Review #18 F2/F3 (Angus): Stop must be terminal. Set SHUTDOWN FIRST
+        // so the worker's drain loop cannot relaunch (a pending UPGRADE used
+        // to resurrect the server the user just stopped), and mark STOPPING
+        // so lifecycle reflects reality between here and the worker's finally.
+        pendingOp.set(PendingOp.SHUTDOWN)
+        lifecycle.set(State.STOPPING)
+        setStatus("stopped (by user)")
+        try { proc?.destroy() } catch (_: Exception) {}
+        worker?.interrupt() // advisory: waitFor is not interruptible
         super.onDestroy()
     }
 }
