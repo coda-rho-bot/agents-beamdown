@@ -26,7 +26,7 @@ class MainActivity : android.app.Activity() {
         private val DEFAULT_ENV = LettaEnvironmentService.DEFAULT_ENV
         // Prefix + length + charset — a bare startsWith accepted the literal
         // string "sk-let-" (review task_92 #2).
-        private val KEY_REGEX = Regex("^sk-let-[A-Za-z0-9_-]{20,}$")
+        private val KEY_REGEX = Regex("^sk-let-[A-Za-z0-9+/=_-]{20,}$")
         // Env name is interpolated into a shell script — unquoted spaces broke
         // launch with an opaque exit 1 (review task_92 #4). Restricted charset
         // is the real fix; quoting in the service is defense-in-depth.
