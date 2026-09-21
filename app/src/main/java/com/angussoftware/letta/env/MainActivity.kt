@@ -2,14 +2,21 @@ package com.angussoftware.letta.env
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -25,7 +32,8 @@ class MainActivity : android.app.Activity() {
         private val PREF_ENV = LettaEnvironmentService.PREF_ENV
         private val DEFAULT_ENV = LettaEnvironmentService.DEFAULT_ENV
         // Prefix + length + charset — a bare startsWith accepted the literal
-        // string "sk-let-" (review task_92 #2).
+        // string "sk-let-" (review task_92 #2). Charset includes = + /
+        // (base64 family): real keys carry = padding.
         private val KEY_REGEX = Regex("^sk-let-[A-Za-z0-9+/=_-]{20,}$")
         // Env name is interpolated into a shell script — unquoted spaces broke
         // launch with an opaque exit 1 (review task_92 #4). Restricted charset
@@ -33,9 +41,52 @@ class MainActivity : android.app.Activity() {
         private val ENV_REGEX = Regex("^[a-z0-9][a-z0-9-_]{0,63}$")
     }
 
+    // ---- palette: resolved per uiMode so both dark and light look right ----
+    private object C {
+        var bg = 0; var surface = 0; var textPrimary = 0; var textSecondary = 0
+        var ok = 0; var warn = 0; var error = 0; var accent = 0; var outline = 0
+    }
+
+    private fun resolvePalette() {
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        if (night) {
+            C.bg = Color.parseColor("#0E1116"); C.surface = Color.parseColor("#1A2028")
+            C.textPrimary = Color.parseColor("#E6EAF0"); C.textSecondary = Color.parseColor("#8B93A1")
+            C.ok = Color.parseColor("#4ADE80"); C.warn = Color.parseColor("#FBBF24")
+            C.error = Color.parseColor("#F87171"); C.accent = Color.parseColor("#38BDF8")
+            C.outline = Color.parseColor("#2A323E")
+        } else {
+            C.bg = Color.parseColor("#F5F7FA"); C.surface = Color.WHITE
+            C.textPrimary = Color.parseColor("#111827"); C.textSecondary = Color.parseColor("#6B7280")
+            C.ok = Color.parseColor("#15803D"); C.warn = Color.parseColor("#B45309")
+            C.error = Color.parseColor("#B91C1C"); C.accent = Color.parseColor("#0369A1")
+            C.outline = Color.parseColor("#E2E6EC")
+        }
+    }
+
+    private fun dp(v: Int): Int = (resources.displayMetrics.density * v).toInt()
+
+    /** Rounded card surface. */
+    private fun card(radius: Int = 14): GradientDrawable = GradientDrawable().apply {
+        setColor(C.surface)
+        cornerRadius = dp(radius).toFloat()
+        setStroke(dp(1), C.outline)
+    }
+
+    // ---- views ----
     private val handler = Handler(Looper.getMainLooper())
-    private lateinit var statusView: TextView
+    private lateinit var statusDot: TextView
+    private lateinit var statusLine: TextView
+    private lateinit var envLine: TextView
+    private lateinit var batteryBanner: LinearLayout
+    private lateinit var batteryBannerText: TextView
+    private lateinit var logCard: LinearLayout
+    private lateinit var logHeader: LinearLayout
+    private lateinit var logChevron: TextView
+    private lateinit var logScroll: ScrollView
     private lateinit var logView: TextView
+    private var logExpanded = false
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -45,6 +96,7 @@ class MainActivity : android.app.Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        resolvePalette()
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
             showOnboarding()
@@ -53,30 +105,57 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        resolvePalette()
+        recreate() // re-render with new palette (cheap; no state to lose)
+    }
+
     /** First-run (or reconfigure): Letta API key + environment name. */
     private fun showOnboarding() {
-        val pad = (resources.displayMetrics.density * 16).toInt()
+        val pad = dp(20)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad * 2, pad, pad)
+            setPadding(pad, dp(40), pad, pad)
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(C.bg)
         }
         val title = TextView(this).apply {
             text = "Letta Environment"
-            textSize = 24f
+            textSize = 26f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
         val subtitle = TextView(this).apply {
             text = "Connect this phone as a Letta cloud execution environment.\n\n1. Create an API key at letta.com (Settings → API Keys)\n2. Paste it below"
             textSize = 14f
-            setPadding(0, pad, 0, pad / 2)
+            setTextColor(C.textSecondary)
+            setPadding(0, pad, 0, pad)
+        }
+        val fieldCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, pad, pad, pad)
+        }
+        val keyLabel = TextView(this).apply {
+            text = "API key"; textSize = 12f; setTextColor(C.textSecondary)
         }
         val keyField = EditText(this).apply {
             hint = "sk-let-…"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setHintTextColor(C.textSecondary)
+            setTextColor(C.textPrimary)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSingleLine()
+        }
+        val envLabel = TextView(this).apply {
+            text = "Environment name"; textSize = 12f; setTextColor(C.textSecondary)
+            setPadding(0, dp(12), 0, 0)
         }
         val envField = EditText(this).apply {
             hint = "environment name (e.g. my-phone)"
+            setHintTextColor(C.textSecondary)
+            setTextColor(C.textPrimary)
             setSingleLine()
             setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV))
         }
@@ -99,52 +178,146 @@ class MainActivity : android.app.Activity() {
                     .apply()
                 // Re-key/rename with a live server: stop it FIRST so the new
                 // config actually takes effect (old flow left the old-key
-                // server running and just showed the new masked key — review
-                // task_92 #1 / task_93 #3). Keep server.log for diagnosis;
-                // the service rewrites launch-server.sh on every start, so
-                // deleting it was cosmetic.
+                // server running — review task_92 #1 / task_93 #3).
                 stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java))
                 ensureRuntimePermissions()
                 showMain()
                 startEnvironment()
             }
         }
+        fieldCard.addView(keyLabel); fieldCard.addView(keyField)
+        fieldCard.addView(envLabel); fieldCard.addView(envField)
         root.addView(title)
         root.addView(subtitle)
-        root.addView(keyField)
-        root.addView(envField)
+        root.addView(fieldCard)
         root.addView(saveBtn)
+        val spacer = View(this)
+        root.addView(spacer, LinearLayout.LayoutParams(1, dp(24)))
         setContentView(root)
     }
 
     private fun showMain() {
-        val pad = (resources.displayMetrics.density * 16).toInt()
+        val pad = dp(16)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad * 2, pad, pad)
+            setPadding(pad, dp(24), pad, pad)
+            setBackgroundColor(C.bg)
         }
-        statusView = TextView(this).apply { textSize = 16f }
-        logView = TextView(this).apply {
-            textSize = 11f
-            typeface = android.graphics.Typeface.MONOSPACE
+
+        // ---- header ----
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        val startBtn = Button(this).apply {
-            text = "Start environment"
+        val title = TextView(this).apply {
+            text = "Letta Environment"
+            textSize = 20f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        envLine = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textSecondary)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        header.addView(title)
+        header.addView(envLine, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(header)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- status card ----
+        val statusCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = card()
+            setPadding(pad, pad, pad, pad)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        statusDot = TextView(this).apply {
+            text = "●"
+            textSize = 18f
+            setPadding(0, 0, dp(10), 0)
+        }
+        val statusCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statusLine = TextView(this).apply {
+            textSize = 15f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val keyLine = TextView(this).apply {
+            textSize = 12f
+            setTextColor(C.textSecondary)
+        }
+        keyLine.tag = "keyline"
+        statusCol.addView(statusLine)
+        statusCol.addView(keyLine)
+        statusCard.addView(statusDot)
+        statusCard.addView(statusCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(statusCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- battery warning banner (48dp target, tinted, tap to fix) ----
+        batteryBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                setColor((if (true) C.error else C.error)) // tinted below by state
+                cornerRadius = dp(12).toFloat()
+            }
+            minimumHeight = dp(48)
+            setPadding(pad, dp(10), pad, dp(10))
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+                .getDrawable(0)?.apply { setBounds(0, 0, 0, 0) }
+            setOnClickListener { requestBatteryExemption() }
+        }
+        batteryBannerText = TextView(this).apply {
+            text = "Battery optimization can kill this app overnight. Tap to set it to Unrestricted."
+            textSize = 13f
+            setTextColor(Color.WHITE)
+        }
+        batteryBanner.addView(batteryBannerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(batteryBanner)
+
+        // ---- actions: two compact rows in one card ----
+        val actionCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        fun actionButton(label: String, danger: Boolean = false): Button = Button(this).apply {
+            text = label
+            textSize = 14f
+            val dark = isDark()
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                if (danger) (if (dark) 0x30F87171.toInt() else 0x14B91C1C.toInt())
+                else (if (dark) 0x2A38BDF8.toInt() else 0x140369A1.toInt())
+            )
+            setTextColor(
+                if (danger) (if (dark) 0xFFF0A0A0.toInt() else 0xFFB91C1C.toInt())
+                else (if (dark) 0xFF7DD3FC.toInt() else 0xFF0369A1.toInt())
+            )
+        }
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val startBtn = actionButton("Start").apply {
             setOnClickListener {
                 ensureRuntimePermissions()
                 startEnvironment()
             }
         }
-        val stopBtn = Button(this).apply {
-            text = "Stop"
+        val stopBtn = actionButton("Stop", danger = true).apply {
             setOnClickListener { stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java)) }
         }
-        val rekeyBtn = Button(this).apply {
-            text = "Change API key / name"
+        row1.addView(startBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row1.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
+        row1.addView(stopBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        val rekeyBtn = actionButton("Key / Name").apply {
             setOnClickListener { showOnboarding() }
         }
-        val upgradeBtn = Button(this).apply {
-            text = "Upgrade letta-code"
+        val upgradeBtn = actionButton("Upgrade").apply {
             setOnClickListener {
                 android.app.AlertDialog.Builder(this@MainActivity)
                     .setTitle("Upgrade letta-code?")
@@ -161,14 +334,107 @@ class MainActivity : android.app.Activity() {
                     .show()
             }
         }
-        root.addView(statusView)
-        root.addView(startBtn)
-        root.addView(stopBtn)
-        root.addView(rekeyBtn)
-        root.addView(upgradeBtn)
-        val scroll = ScrollView(this).apply { addView(logView) }
-        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        row2.addView(rekeyBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row2.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
+        row2.addView(upgradeBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        actionCard.addView(row1)
+        actionCard.addView(row2)
+        root.addView(actionCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- collapsible log card ----
+        logCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+        }
+        logHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(pad, dp(12), pad, dp(12))
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).getDrawable(0)
+            setOnClickListener { toggleLog() }
+        }
+        val logTitle = TextView(this).apply {
+            text = "Server log"
+            textSize = 14f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        logChevron = TextView(this).apply {
+            text = "▸"
+            textSize = 16f
+            setTextColor(C.textSecondary)
+        }
+        logHeader.addView(logTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        logHeader.addView(logChevron)
+        logCard.addView(logHeader)
+
+        logView = TextView(this).apply {
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(C.textSecondary)
+            setTextIsSelectable(true)
+        }
+        val hScroll = HorizontalScrollView(this).apply { addView(logView) }
+        logScroll = ScrollView(this).apply {
+            addView(hScroll)
+            visibility = View.GONE
+        }
+        logCard.addView(logScroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(220)))
+        root.addView(logCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
         setContentView(root)
+    }
+
+    private fun isDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    private fun toggleLog() {
+        logExpanded = !logExpanded
+        logScroll.visibility = if (logExpanded) View.VISIBLE else View.GONE
+        logChevron.text = if (logExpanded) "▾" else "▸"
+    }
+
+    /**
+     * True when the app is exempt from battery optimization (Samsung: battery
+     * setting "Unrestricted"). When false, Android will suspend the app under
+     * memory/battery pressure — killed the server overnight twice (Aug 28,
+     * Sep 20 2026).
+     */
+    private fun isBatteryUnrestricted(): Boolean {
+        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** One-tap path to the system exemption dialog for THIS app. */
+    private fun requestBatteryExemption() {
+        try {
+            val intent = Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                try {
+                    startActivity(Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    ))
+                } catch (e3: Exception) {
+                    // All three blocked (aggressive OEM): tell the user where to go.
+                    Toast.makeText(this,
+                        "Couldn't open the exemption screen — exempt \"Letta Environment\" in Settings → Apps → Battery",
+                        Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     /**
@@ -208,19 +474,69 @@ class MainActivity : android.app.Activity() {
         handler.removeCallbacks(refresh)
     }
 
-    private fun renderStatus() {
-        if (!::statusView.isInitialized) return // onboarding path never builds these views
-        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val env = prefs.getString(PREF_ENV, DEFAULT_ENV)
-        val statusFile = File(filesDir, "status.txt")
-        val logFile = File(filesDir, "server.log")
-        val statusText = if (statusFile.exists()) statusFile.readText() else "Not started"
-        statusView.text = "$statusText\nkey: ${maskKey(prefs.getString(PREF_KEY, ""))}"
-        logView.text = if (logFile.exists()) {
-            logFile.readLines().takeLast(40).joinToString("\n")
-        } else ""
+    /** Map status.txt state string to (color, label). */
+    private fun stateOf(raw: String): Pair<Int, String> = when {
+        raw.contains("online") -> C.ok to "Online"
+        raw.contains("registered") -> C.ok to "Registered"
+        raw.contains("registering") -> C.warn to "Registering…"
+        raw.contains("starting") -> C.warn to "Starting…"
+        raw.contains("extracting") -> C.warn to "Extracting rootfs…"
+        raw.contains("upgrading") -> C.warn to "Upgrading…"
+        raw.contains("crashed") -> C.error to "Crashed"
+        raw.contains("failed") -> C.error to "Failed"
+        raw.contains("exited") -> C.textSecondary to "Stopped"
+        raw.contains("stopping") -> C.textSecondary to "Stopping…"
+        else -> C.textSecondary to raw.removePrefix("state=").take(28).ifEmpty { "Not started" }
     }
 
+    private fun renderStatus() {
+        if (!::statusLine.isInitialized) return // onboarding path never builds these views
+        runCatching {
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            val env = prefs.getString(PREF_ENV, DEFAULT_ENV)
+            val statusFile = File(filesDir, "status.txt")
+            val logFile = File(filesDir, "server.log")
+            val rawStatus = if (statusFile.exists()) statusFile.readText() else ""
+            val (color, label) = stateOf(rawStatus)
+            statusDot.setTextColor(color)
+            statusLine.text = label
+            statusLine.setTextColor(color)
+            envLine.text = env
+            (statusLine.parent as? LinearLayout)?.getChildAt(1)?.let { v ->
+                (v as? TextView)?.text = "key: ${maskKey(prefs.getString(PREF_KEY, ""))}"
+            }
+            // Battery banner: re-evaluated each tick; clears itself when granted.
+            batteryBanner.visibility =
+                if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
+            (batteryBanner.background as? GradientDrawable)?.setColor(0x26F87171.toInt())
+
+            if (logExpanded) {
+                val tail = if (logFile.exists()) {
+                    // tail-read: cap to last 64KB to bound main-thread work
+                    RandomAccessTail.tail(logFile, 64 * 1024)
+                } else ""
+                val atBottom = !logScroll.canScrollVertically(1)
+                logView.text = tail
+                if (atBottom) logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    /** Prefix-only masking — old version leaked 3 secret-body chars (task_92 #8). */
     private fun maskKey(key: String?): String =
-        if (key.isNullOrBlank()) "not set" else key.take(10) + "…" + key.takeLast(4)
+        if (key.isNullOrBlank()) "not set" else "sk-let-" + "•".repeat(6) + key.takeLast(4)
+}
+
+/** Bounded tail read: seek near end, return last complete lines. */
+private object RandomAccessTail {
+    fun tail(f: File, maxBytes: Int): String {
+        java.io.RandomAccessFile(f, "r").use { raf ->
+            val start = maxOf(0L, raf.length() - maxBytes)
+            raf.seek(start)
+            val bytes = ByteArray((raf.length() - start).toInt())
+            raf.readFully(bytes)
+            val text = String(bytes, Charsets.UTF_8)
+            return text.substringAfter("\n").takeLast(8000) // drop partial line, cap chars
+        }
+    }
 }
