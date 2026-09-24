@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="a11y_description">Lets the Letta environment agent operate this phone: read screen content, tap, swipe, and type on your behalf. Only you grant it, and you can revoke it any time in Settings > Accessibility.</string>
+    <string name="a11y_label">Letta Environment Agent</string>
+</resources>

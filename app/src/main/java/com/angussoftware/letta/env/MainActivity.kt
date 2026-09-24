@@ -340,6 +340,36 @@ class MainActivity : android.app.Activity() {
         row2.addView(upgradeBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         actionCard.addView(row1)
         actionCard.addView(row2)
+
+        // ---- phone-control setup card (accessibility off = agent can't drive UI) ----
+        val a11yEnabled = isA11yEnabled()
+        val a11yCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val a11yText = TextView(this).apply {
+            text = if (a11yEnabled) "Phone control: ON — agent can operate apps"
+                   else "Phone control: OFF — enable to let the agent use apps"
+            textSize = 13f
+            setTextColor(if (a11yEnabled) C.ok else C.textSecondary)
+        }
+        val a11yBtn = Button(this).apply {
+            text = if (a11yEnabled) "Settings" else "Enable"
+            textSize = 13f
+            setOnClickListener {
+                // Deep link straight to our service's a11y toggle screen
+                runCatching {
+                    val i = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    startActivity(i)
+                }
+            }
+        }
+        a11yCard.addView(a11yText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        a11yCard.addView(a11yBtn)
+        root.addView(a11yCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
         root.addView(actionCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
@@ -406,6 +436,14 @@ class MainActivity : android.app.Activity() {
      * memory/battery pressure — killed the server overnight twice (Aug 28,
      * Sep 20 2026).
      */
+    /** True when our AgentAccessibilityService is enabled by the user. */
+    private fun isA11yEnabled(): Boolean {
+        val expected = "$packageName/.AgentAccessibilityService"
+        val setting = android.provider.Settings.Secure.getString(
+            contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+        return setting.split(':').any { it.equals(expected, ignoreCase = true) || it.endsWith("/.AgentAccessibilityService") }
+    }
+
     private fun isBatteryUnrestricted(): Boolean {
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
         return pm.isIgnoringBatteryOptimizations(packageName)
