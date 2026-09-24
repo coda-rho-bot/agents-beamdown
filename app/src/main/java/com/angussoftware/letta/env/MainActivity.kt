@@ -80,6 +80,8 @@ class MainActivity : android.app.Activity() {
     private lateinit var statusDot: TextView
     private lateinit var statusLine: TextView
     private lateinit var envLine: TextView
+    private var a11yDotView: TextView? = null
+    private var a11yTextView: TextView? = null
     private lateinit var batteryBanner: LinearLayout
     private lateinit var batteryBannerText: TextView
     private lateinit var logCard: LinearLayout
@@ -343,28 +345,23 @@ class MainActivity : android.app.Activity() {
 
         // ---- phone-control setup card (accessibility off = agent can't drive UI) ----
         val a11yEnabled = isA11yEnabled()
-        val a11yCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = card()
-            setPadding(pad, dp(12), pad, dp(12))
-        }
-        val a11yHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val a11yDot = TextView(this).apply {
+        // Held as fields so the 2s refresh tick can live-update the card
+        // (grant/revoke while the app is open reflects within 2s).
+        a11yDotView = TextView(this).apply {
             text = "●"
             textSize = 16f
             setTextColor(if (a11yEnabled) C.ok else C.warn)
             setPadding(0, 0, dp(8), 0)
         }
-        val a11yText = TextView(this).apply {
+        val a11yDot = a11yDotView!!
+        a11yTextView = TextView(this).apply {
             text = if (a11yEnabled) "Phone control: ON — agent can operate apps"
                    else "Phone control: OFF"
             textSize = 14f
             setTextColor(if (a11yEnabled) C.ok else C.textPrimary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
+        val a11yText = a11yTextView!!
         val a11yBtn = Button(this).apply {
             text = if (a11yEnabled) "Settings" else "Enable"
             textSize = 13f
@@ -384,6 +381,15 @@ class MainActivity : android.app.Activity() {
                     .setNegativeButton("Not now", null)
                     .show()
             }
+        }
+        val a11yCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+        }
+        val a11yHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
         a11yHeader.addView(a11yDot)
         a11yHeader.addView(a11yText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -457,12 +463,16 @@ class MainActivity : android.app.Activity() {
      * memory/battery pressure — killed the server overnight twice (Aug 28,
      * Sep 20 2026).
      */
-    /** True when our AgentAccessibilityService is enabled by the user. */
+    /** True when our AgentAccessibilityService is enabled by the user.
+     *  Samsung stores the FULL component name (pkg/pkg.AgentAccessibilityService);
+     *  AOSP sometimes uses short form (pkg/.AgentAccessibilityService). Match both. */
     private fun isA11yEnabled(): Boolean {
-        val expected = "$packageName/.AgentAccessibilityService"
         val setting = android.provider.Settings.Secure.getString(
             contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-        return setting.split(':').any { it.equals(expected, ignoreCase = true) || it.endsWith("/.AgentAccessibilityService") }
+        return setting.split(':').any {
+            it.contains("AgentAccessibilityService", ignoreCase = true) &&
+            it.substringBefore('/').equals(packageName, ignoreCase = true)
+        }
     }
 
     // ---- a11y setup guide ----------------------------------------------------
@@ -629,6 +639,15 @@ class MainActivity : android.app.Activity() {
                 (v as? TextView)?.text = "key: ${maskKey(prefs.getString(PREF_KEY, ""))}"
             }
             // Battery banner: re-evaluated each tick; clears itself when granted.
+            // Phone-control card: live state each tick (grant/revoke reflects in 2s)
+            a11yDotView?.setTextColor(if (isA11yEnabled()) C.ok else C.warn)
+            val a11yOn = isA11yEnabled()
+            a11yTextView?.apply {
+                text = if (a11yOn) "Phone control: ON — agent can operate apps"
+                       else "Phone control: OFF"
+                setTextColor(if (a11yOn) C.ok else C.textPrimary)
+            }
+
             batteryBanner.visibility =
                 if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
             // Review #19 N3: solid error-tinted bg in light mode (white text

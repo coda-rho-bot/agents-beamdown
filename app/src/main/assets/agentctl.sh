@@ -38,6 +38,8 @@ case "${1:-help}" in
     back)      send '{"cmd":"back"}' ;;
     home)      send '{"cmd":"home"}' ;;
     notifications) send '{"cmd":"notifications"}' ;;
+    click)     send "{"cmd":"click","text":"$(printf '%s' "$2" | sed 's/"/\\"/g')"}" ;;
+    clickId)   send "{\"cmd\":\"clickId\",\"id\":\"$2\"}" ;;
     screen)    send '{"cmd":"screenshot-text"}' ;;
     tree)      send "{\"cmd\":\"tree\",\"maxDepth\":${2:-18}}" ;;
     launch)    send "{\"cmd\":\"launch\",\"uri\":\"$2\"}" ;;

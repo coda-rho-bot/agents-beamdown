@@ -144,6 +144,8 @@ class AgentAccessibilityService : AccessibilityService() {
         "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS).let { ok().put("performed", it) }
         "screenshot-text" -> visibleText()
         "tree" -> activeTree(req.optInt("maxDepth", 18))
+        "click" -> nodeClick(req.getString("text"))
+        "clickId" -> nodeClickId(req.getString("id"))
         "launch" -> {
             // Handled client-side by agentctl (am start) in most cases; kept for URI intents
             val uri = req.optString("uri")
@@ -267,6 +269,44 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun pkgOf(root: AccessibilityNodeInfo): String =
         root.packageName?.toString() ?: "?"
+
+    /** Node-based click: find node whose text/desc CONTAINS the query (first
+     *  match, or clickable ancestor), then performAction(ACTION_CLICK).
+     *  Immune to Samsung's injected-gesture cancellation — no touch synthesis. */
+    private fun nodeClick(query: String): JSONObject {
+        val root = rootInActiveWindow ?: return err().put("error", "no active window")
+        val target = findNode(root) { n ->
+            (n.text?.toString()?.contains(query, ignoreCase = true) == true) ||
+            (n.contentDescription?.toString()?.contains(query, ignoreCase = true) == true)
+        } ?: return err().put("error", "no node matching \"$query\"")
+        // Walk up to the nearest clickable ancestor if the node itself isn't
+        var node = target
+        var hops = 0
+        while (!node.isClickable && node.parent != null && hops < 6) {
+            node = node.parent ?: break; hops++
+        }
+        if (!node.isClickable) return err()
+            .put("error", "match \"$query\" found but neither it nor ancestors clickable")
+        val done = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return if (done) ok().put("clicked", query).put("hops", hops)
+               else err().put("error", "ACTION_CLICK denied by node")
+    }
+
+    /** Click by view-id resource name (exact). */
+    private fun nodeClickId(id: String): JSONObject {
+        val root = rootInActiveWindow ?: return err().put("error", "no active window")
+        val node = findNode(root) { n -> n.viewIdResourceName == id }
+            ?: return err().put("error", "no node with id \"$id\"")
+        val done = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return if (done) ok().put("clicked", id) else err().put("error", "ACTION_CLICK denied")
+    }
+
+    private fun findNode(root: AccessibilityNodeInfo, pred: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        var found: AccessibilityNodeInfo? = null
+        walkNodes(root) { n -> if (found == null && pred(n)) found = n }
+        return found
+    }
+
 
     private fun log(msg: String) {
         runCatching {
