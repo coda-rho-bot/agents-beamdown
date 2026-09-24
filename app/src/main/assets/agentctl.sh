@@ -6,17 +6,19 @@
 #
 # Commands (see AgentAccessibilityService.handle):
 #   agentctl ping
-#   agentctl tap <x> <y>
-#   agentctl longpress <x> <y>
-#   agentctl swipe <fx> <fy> <tx> <ty> [duration_ms]
-#   agentctl text "hello world"      (types into the focused field)
+#   agentctl tap <x> <y>            (BLOCKED on One UI 7 — gesture filter; use click)
+#   agentctl longpress <x> <y>      (BLOCKED on One UI 7 — use click + a11y)
+#   agentctl swipe ...              (BLOCKED on One UI 7)
+#   agentctl click "label"          (node-click by text/desc — Samsung-proof input)
+#   agentctl clickId view-id        (node-click by resource id)
+#   agentctl text "hello world"     (types into the focused field)
 #   agentctl back | home | notifications
-#   agentctl keyevent <keycode>      (arbitrary keys via input keyevent)
-#   agentctl screen                  (visible text + bounds JSON)
-#   agentctl tree [maxdepth]         (active window hierarchy JSON)
-#   agentctl launch <intent-uri>     (ACTION_VIEW)
-#   agentctl am <args...>            (passthrough to am; e.g. start -n pkg/.Act)
-#   agentctl notify "title" "text"   (app's own notification — always allowed)
+#   agentctl keyevent <keycode>     (needs INJECT_EVENTS — often denied; prefer back/home)
+#   agentctl screen                 (visible text + bounds JSON)
+#   agentctl tree [maxdepth]        (active window hierarchy JSON)
+#   agentctl launch <intent-uri>    (ACTION_VIEW — WORKS where shell am start is blocked)
+#   agentctl am <args...>           (passthrough to am; Samsung blocks some targets)
+#   agentctl notify "title" "text"  (app's own notification — always allowed)
 #
 # Requires: Settings > Accessibility > Letta Environment Agent = ON (a11y cmds).
 # am/notify/keyevent work WITHOUT accessibility.

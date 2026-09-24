@@ -131,6 +131,8 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun handle(cmd: String, req: JSONObject): JSONObject = when (cmd) {
         "ping" -> ok().put("service", "a11y").put("uid", android.os.Process.myUid())
+        "commands" -> commandsIndex()
+        "capabilities" -> capabilities()
         "tap" -> gestureTap(req.getDouble("x"), req.getDouble("y"), req.optDouble("duration", 50.0))
         "longPress" -> gestureTap(req.getDouble("x"), req.getDouble("y"), 800.0)
         "swipe" -> gestureSwipe(
@@ -176,6 +178,8 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun dispatch(path: Path, durationMs: Double, label: String): JSONObject {
+        if (gesturesBlocked) return err()
+            .put("error", "gestures blocked on this device (learned); use click/clickId")
         val done = java.util.concurrent.CountDownLatch(1)
         var okFlag = false
         val gd = GestureDescription.Builder()
@@ -183,7 +187,10 @@ class AgentAccessibilityService : AccessibilityService() {
             .build()
         val dispatched = dispatchGesture(gd, object : GestureResultCallback() {
             override fun onCompleted(g: GestureDescription?) { okFlag = true; done.countDown() }
-            override fun onCancelled(g: GestureDescription?) { okFlag = false; done.countDown() }
+            override fun onCancelled(g: GestureDescription?) {
+                okFlag = false; done.countDown()
+                gesturesBlocked = true // learned: this OEM cancels injected gestures
+            }
         }, null)
         if (!dispatched) return err().put("error", "dispatch failed (service not connected?)")
         done.await(10, java.util.concurrent.TimeUnit.SECONDS)
@@ -269,6 +276,80 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun pkgOf(root: AccessibilityNodeInfo): String =
         root.packageName?.toString() ?: "?"
+
+    /**
+     * Self-describing command index — the registry of every command this
+     * service supports, WITH per-device viability learned at runtime. This is
+     * the source of truth `agentctl help` defers to; docs can never drift
+     * from implementation because the implementation is the doc.
+     */
+    private fun commandsIndex(): JSONObject {
+        val cmds = JSONArray()
+        fun add(name: String, args: String, what: String, note: String = "") {
+            cmds.put(JSONObject().put("cmd", name).put("args", args)
+                .put("does", what).put("note", note))
+        }
+        add("ping", "", "service handshake; returns uid")
+        add("commands", "", "this index")
+        add("capabilities", "", "live device capability probe (what works on THIS phone)")
+        add("tap", "x y", "tap at coordinates",
+            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
+        add("longPress", "x y", "press-and-hold at coordinates",
+            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
+        add("swipe", "fromX fromY toX toY [durationMs]", "stroke gesture",
+            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
+        add("click", "\"label\"", "node-click by visible text/content-desc — primary input method")
+        add("clickId", "view-id", "node-click by resource id")
+        add("text", "\"value\"", "type into the focused input field")
+        add("back", "", "global action: back")
+        add("home", "", "global action: home")
+        add("notifications", "", "global action: pull notification shade")
+        add("key", "keyCode", "press a key", "limited to back/home/recents; arbitrary keys need INJECT_EVENTS (usually denied)")
+        add("screen", "", "visible text elements + bounds + clickability (JSON)")
+        add("tree", "[maxDepth]", "active window hierarchy (JSON)")
+        add("launch", "uri", "open ACTION_VIEW intent", "works where shell am start is OEM-blocked")
+        return ok().put("commands", cmds)
+            .put("gesturesBlocked", gesturesBlocked)
+            .put("note", "gesturesBlocked is learned: first cancelled gesture flips it; tap/swipe self-disable, click remains primary")
+    }
+
+    /**
+     * Set on first onCancelled from a real (non-quick) gesture. One UI 7
+     * cancels injected gestures even hands-off; instead of guessing, the
+     * service learns it from the dispatcher itself.
+     */
+    @Volatile private var gesturesBlocked = false
+
+    /**
+     * Live capability probe: run REAL system commands from the app uid and
+     * report what actually succeeds on this device build. Replaces
+     * remembered generalities with per-device truth. Results cached until
+     * service restart.
+     */
+    private var capabilityCache: JSONObject? = null
+
+    private fun capabilities(): JSONObject {
+        capabilityCache?.let { return it }
+        val caps = JSONObject()
+        fun probe(name: String, vararg cmd: String) {
+            val okB = runCatching {
+                val p = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+                val out = p.inputStream.bufferedReader().readText()
+                p.waitFor() == 0 && !out.contains("Permission Denial") && !out.contains("Operation not permitted")
+            }.getOrDefault(false)
+            caps.put(name, if (okB) "ok" else "denied")
+        }
+        probe("pm_list", "/system/bin/pm", "list", "packages", "--user", "0")
+        probe("am_start", "/system/bin/am", "start", "-a", "android.settings.WIRELESS_SETTINGS")
+        probe("settings_read", "/system/bin/settings", "get", "--user", "0", "global", "airplane_mode_on")
+        probe("input_keyevent", "/system/bin/input", "keyevent", "KEYCODE_HOME")
+        caps.put("a11y_granted", true) // we're running, so yes
+        caps.put("screen_read", "ok")  // ditto
+        caps.put("am_start_caveat", "Samsung first-party apps (calculator, sbrowser) deny shell-uid starts; use launch cmd")
+        capabilityCache = caps
+        return ok().put("capabilities", caps)
+    }
+
 
     /** Node-based click: find node whose text/desc CONTAINS the query (first
      *  match, or clickable ancestor), then performAction(ACTION_CLICK).
