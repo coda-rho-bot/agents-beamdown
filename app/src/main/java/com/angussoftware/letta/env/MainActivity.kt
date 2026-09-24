@@ -344,30 +344,51 @@ class MainActivity : android.app.Activity() {
         // ---- phone-control setup card (accessibility off = agent can't drive UI) ----
         val a11yEnabled = isA11yEnabled()
         val a11yCard = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             background = card()
             setPadding(pad, dp(12), pad, dp(12))
+        }
+        val a11yHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+        }
+        val a11yDot = TextView(this).apply {
+            text = "●"
+            textSize = 16f
+            setTextColor(if (a11yEnabled) C.ok else C.warn)
+            setPadding(0, 0, dp(8), 0)
         }
         val a11yText = TextView(this).apply {
             text = if (a11yEnabled) "Phone control: ON — agent can operate apps"
-                   else "Phone control: OFF — enable to let the agent use apps"
-            textSize = 13f
-            setTextColor(if (a11yEnabled) C.ok else C.textSecondary)
+                   else "Phone control: OFF"
+            textSize = 14f
+            setTextColor(if (a11yEnabled) C.ok else C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
         val a11yBtn = Button(this).apply {
             text = if (a11yEnabled) "Settings" else "Enable"
             textSize = 13f
             setOnClickListener {
-                // Deep link straight to our service's a11y toggle screen
-                runCatching {
-                    val i = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    startActivity(i)
-                }
+                // Full explanation first — informed consent, not a mystery toggle.
+                val bodyRes = resources.getIdentifier("a11y_explain_body", "string", packageName)
+                val titleRes = resources.getIdentifier("a11y_explain_title", "string", packageName)
+                val body = if (bodyRes != 0) getString(bodyRes)
+                    else "Grant the Letta Environment Agent accessibility access so it can see the screen, tap, swipe, and type on your behalf. Revocable any time in Settings > Accessibility."
+                val title = if (titleRes != 0) getString(titleRes) else "Enable phone control?"
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle(title)
+                    .setMessage(body)
+                    .setPositiveButton(if (a11yEnabled) "Open Settings" else "Continue") { _, _ ->
+                        startA11yGuide()
+                    }
+                    .setNegativeButton("Not now", null)
+                    .show()
             }
         }
-        a11yCard.addView(a11yText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        a11yCard.addView(a11yBtn)
+        a11yHeader.addView(a11yDot)
+        a11yHeader.addView(a11yText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        a11yHeader.addView(a11yBtn)
+        a11yCard.addView(a11yHeader)
         root.addView(a11yCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
         root.addView(actionCard)
@@ -444,6 +465,64 @@ class MainActivity : android.app.Activity() {
         return setting.split(':').any { it.equals(expected, ignoreCase = true) || it.endsWith("/.AgentAccessibilityService") }
     }
 
+    // ---- a11y setup guide ----------------------------------------------------
+    // A persistent companion notification walks the user through Settings
+    // (their shade stays available while they navigate Samsung's menus), and
+    // this activity polls for the grant and celebrates when it lands.
+
+    private var guideActive = false
+    private val guideCheck = object : Runnable {
+        override fun run() {
+            if (!guideActive) return
+            if (isA11yEnabled()) { onA11yGranted(); return }
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    /** Start the guided enable flow: notification companion + toggle polling. */
+    private fun startA11yGuide() {
+        guideActive = true
+        postGuideNotification(
+            "1. Open Settings → Accessibility",
+            "2. Tap \"Installed apps\" (or \"Downloaded apps\")\n" +
+            "3. Tap \"Letta Environment Agent\"\n" +
+            "4. Toggle ON → \"Allow\"\n" +
+            "\nThis notification updates itself — keep going!")
+        handler.postDelayed(guideCheck, 1000)
+        runCatching {
+            startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    private fun onA11yGranted() {
+        guideActive = false
+        handler.removeCallbacks(guideCheck)
+        postGuideNotification(
+            "Phone control enabled ✓",
+            "The agent can now see the screen, tap, swipe, and type. " +
+            "Revoke any time: Settings → Accessibility → Letta Environment Agent.")
+        Toast.makeText(this, "Phone control enabled ✓", Toast.LENGTH_LONG).show()
+        // Re-render the card state (showMain rebuild is cheap)
+        runCatching { showMain() }
+    }
+
+    private fun postGuideNotification(title: String, text: String) {
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        val n = android.app.Notification.Builder(this, "letta-env-agent-alerts")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText("Open to continue setup")
+            .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(
+                android.app.PendingIntent.getActivity(this, 0,
+                    Intent(this, MainActivity::class.java),
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE))
+            .build()
+        nm.notify(6100, n)
+    }
+
     private fun isBatteryUnrestricted(): Boolean {
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
         return pm.isIgnoringBatteryOptimizations(packageName)
@@ -508,6 +587,8 @@ class MainActivity : android.app.Activity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(refresh)
+        // Guide poll keeps running while user is in Settings (that's its job);
+        // only refresh tick pauses.
     }
 
     /** Map status.txt content to (color, label) — parse the state= LINE, not the
