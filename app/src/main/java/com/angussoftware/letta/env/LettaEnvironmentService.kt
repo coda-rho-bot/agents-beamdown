@@ -374,6 +374,27 @@ class LettaEnvironmentService : Service() {
                 "await writeFile15(targetPath, contents, { flag: \"wx\" });")
             patched++
         }
+        // 0.33.x: identifiers renamed (link4/writeFile14); publishInitializedFile
+        // writes a .candidate then hard-links. O_EXCL create is equally atomic
+        // and Android-legal. Verified live on 0.33.2 (Sep 25 2026 fix).
+        if ("await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);" in out) {
+            out = out.replace(
+                "await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);",
+                "await writeFile14(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage; O_EXCL create is equally atomic\n    // link4 removed for Android")
+            patched++
+        }
+        // Generic future-proof fallback: any "await linkN(candidatePath, targetPath)"
+        // preceded by a candidate write — swap to direct O_EXCL create.
+        Regex("""await (writeFile\d+)\(candidatePath, contents, \{ flag: "wx" \}\);\s*\n(\s*)await link\d+\(candidatePath, targetPath\);""")
+            .findAll(out).toList().let { matches ->
+                if (matches.isNotEmpty() && patched == 0) {
+                    for (m in matches) {
+                        out = out.replaceRange(m.range,
+                            "await ${m.groupValues[1]}(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage\n${m.groupValues[2]}// link removed for Android")
+                        patched++
+                    }
+                }
+            }
         if ("#!/bin/sh\nexec " in out) {
             out = out.replace("#!/bin/sh\nexec ", "#!/system/bin/sh\nexec ")
             patched++
