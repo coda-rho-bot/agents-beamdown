@@ -20,11 +20,14 @@
 #   agentctl am <args...>           (passthrough to am; Samsung blocks some targets)
 #   agentctl notify "title" "text"  (app's own notification — always allowed)
 #
+# CONSENT-GATED: screen/tree/click/text/launch need an approved session first:
+#   agentctl session "what you want to do" [seconds]   -> full-screen Approve/Deny overlay
 # Requires: Settings > Accessibility > Letta Environment Agent = ON (a11y cmds).
 # am/notify/keyevent work WITHOUT accessibility.
 
 set -u
 PORT=8765
+AGENT_NAME="${AGENT_NAME:-Letta agent}"
 HOST=127.0.0.1
 
 send() {  # send() <<< one line of JSON
@@ -45,6 +48,11 @@ case "${1:-help}" in
     screen)    send '{"cmd":"screenshot-text"}' ;;
     tree)      send "{\"cmd\":\"tree\",\"maxDepth\":${2:-18}}" ;;
     launch)    send "{\"cmd\":\"launch\",\"uri\":\"$2\"}" ;;
+    session)
+        SECS="${3:-300}"
+        DESC=$(printf '%s' "$2" | sed 's/"/\\"/g')
+        send "{\"cmd\":\"session\",\"desc\":\"$DESC\",\"agent\":\"$AGENT_NAME\",\"seconds\":$SECS}"
+        ;;
     keyevent)  /system/bin/input keyevent "$2" ;;
     am)        shift; /system/bin/am "$@" ;;
     pm)        shift; /system/bin/pm "$@" ;;

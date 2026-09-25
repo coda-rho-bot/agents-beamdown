@@ -116,6 +116,9 @@ class AgentAccessibilityService : AccessibilityService() {
      *  a11y calls post to mainHandler and block the socket thread via countdown latch. */
     private fun execute(req: JSONObject): JSONObject {
         val cmd = req.optString("cmd")
+        // Session requests block on the USER, not the main thread — bypass the
+        // 15s main-handler latch and run the wait on the socket thread.
+        if (cmd == "session") return requestConsent(req)
         val latch = java.util.concurrent.CountDownLatch(1)
         var result = JSONObject().put("ok", false).put("error", "no handler")
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -129,10 +132,156 @@ class AgentAccessibilityService : AccessibilityService() {
         return result
     }
 
-    private fun handle(cmd: String, req: JSONObject): JSONObject = when (cmd) {
-        "ping" -> ok().put("service", "a11y").put("uid", android.os.Process.myUid())
-        "commands" -> commandsIndex()
-        "capabilities" -> capabilities()
+    // ---- consent-gated automation ---------------------------------------------------
+    //
+    // Every privacy-bearing command (reading the screen, clicking, typing,
+    // launching apps) is HARD-GATED on an approved session. The agent requests
+    // one with `session`; the user sees a full-screen overlay and Approve/Deny.
+    // No approval -> the gate refuses. Approval expires after its duration.
+    // This is deterministic enforcement in the service, not a prompt guideline.
+
+    private class Consent(val desc: String, val agent: String, val until: Long)
+
+    @Volatile private var consent: Consent? = null
+    @Volatile private var consentPromptShowing = false
+
+    /** Returns null when allowed; otherwise the refusal JSON to send. */
+    private fun gate(): JSONObject? {
+        val c = consent
+        if (c == null || System.currentTimeMillis() > c.until) {
+            consent = null
+            return err()
+                .put("error", "consent required — no approved session. " +
+                    "Request one: agentctl session \"<plain-language description>\" [seconds]")
+                .put("consentRequired", true)
+        }
+        return null
+    }
+
+    /** Called on the SOCKET thread. Shows the overlay, waits for the user. */
+    private fun requestConsent(req: JSONObject): JSONObject {
+        if (consentPromptShowing) return err().put("error", "a consent prompt is already showing")
+        val desc = req.optString("desc", "unspecified agent action")
+        val agent = req.optString("agent", "an agent")
+        val seconds = req.optInt("seconds", 300).coerceIn(30, 3600)
+        val decided = java.util.concurrent.CountDownLatch(1)
+        var approved = false
+        consentPromptShowing = true
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        mainHandler.post {
+            showConsentOverlay(agent, desc, seconds,
+                onApprove = {
+                    consent = Consent(desc, agent, System.currentTimeMillis() + seconds * 1000L)
+                    approved = true; decided.countDown()
+                },
+                onDeny = { approved = false; decided.countDown() })
+        }
+        val userAnswered = decided.await(120, java.util.concurrent.TimeUnit.SECONDS)
+        consentPromptShowing = false
+        mainHandler.post { dismissConsentOverlay() } // no-op if already dismissed
+        return when {
+            !userAnswered -> err().put("error", "no response within 120s — treated as deny")
+            approved -> ok().put("session", desc).put("agent", agent)
+                .put("expiresAt", consent!!.until)
+                .put("seconds", seconds)
+            else -> err().put("error", "denied by user")
+        }
+    }
+
+    private var consentView: android.view.View? = null
+
+    private fun showConsentOverlay(
+        agent: String, desc: String, seconds: Int,
+        onApprove: () -> Unit, onDeny: () -> Unit
+    ) {
+        dismissConsentOverlay()
+        val dp = { v: Int -> (v * resources.displayMetrics.density).toInt() }
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0xF0101014.toInt())
+            setPadding(dp(28), dp(40), dp(28), dp(40))
+            gravity = android.view.Gravity.CENTER
+        }
+        val title = android.widget.TextView(this).apply {
+            text = "Agent requests phone access"
+            textSize = 22f
+            setTextColor(0xFFE8E8E8.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        val who = android.widget.TextView(this).apply {
+            text = agent
+            textSize = 16f
+            setTextColor(0xFF7EC8E3.toInt())
+            setPadding(0, dp(10), 0, 0)
+        }
+        val body = android.widget.TextView(this).apply {
+            text = "“$desc”"
+            textSize = 18f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(0, dp(16), 0, dp(8))
+        }
+        val dur = android.widget.TextView(this).apply {
+            text = "Duration: ${seconds}s — then access revokes automatically. " +
+                "Approving lets the agent see and use this phone for that purpose."
+            textSize = 14f
+            setTextColor(0xFFAAAAAA.toInt())
+            setPadding(0, 0, 0, dp(24))
+        }
+        val buttons = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+        }
+        val deny = android.widget.Button(this).apply {
+            text = "Deny"
+            setOnClickListener { dismissConsentOverlay(); onDeny() }
+        }
+        val approve = android.widget.Button(this).apply {
+            text = "Approve"
+            setOnClickListener { dismissConsentOverlay(); onApprove() }
+        }
+        buttons.addView(deny, android.widget.LinearLayout.LayoutParams(0,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        buttons.addView(approve, android.widget.LinearLayout.LayoutParams(0,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(title); root.addView(who); root.addView(body); root.addView(dur); root.addView(buttons)
+        val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+        val lp = android.view.WindowManager.LayoutParams(
+            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+            android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT)
+        runCatching { wm.addView(root, lp) }
+            .onFailure { onDeny() } // can't show -> fail closed
+        consentView = root
+    }
+
+    private fun dismissConsentOverlay() {
+        consentView?.let { v ->
+            runCatching { (getSystemService(WINDOW_SERVICE) as android.view.WindowManager).removeView(v) }
+        }
+        consentView = null
+    }
+
+
+    private fun handle(cmd: String, req: JSONObject): JSONObject {
+        // Deterministic consent gate: privacy-bearing commands require an
+        // APPROVED session (see requestConsent). Introspection (commands,
+        // capabilities, ping) and pure navigation (home/back) stay ungated.
+        val gated = cmd !in setOf(
+            "ping", "commands", "capabilities", "home", "back",
+            "notifications", "session", "status")
+        if (gated) gate()?.let { return it }
+
+        return when (cmd) {
+            "ping" -> ok().put("service", "a11y").put("uid", android.os.Process.myUid())
+            "commands" -> commandsIndex()
+            "capabilities" -> capabilities()
+            "status" -> ok()
+                .put("sessionActive", consent != null && System.currentTimeMillis() <= consent!!.until)
+                .put("sessionDesc", consent?.desc)
+                .put("sessionExpiresAt", consent?.until)
+                .put("consentPromptShowing", consentPromptShowing)
         "tap" -> gestureTap(req.getDouble("x"), req.getDouble("y"), req.optDouble("duration", 50.0))
         "longPress" -> gestureTap(req.getDouble("x"), req.getDouble("y"), 800.0)
         "swipe" -> gestureSwipe(
@@ -157,6 +306,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 .fold({ ok() }, { err().put("error", it.message) })
         }
         else -> err().put("error", "unknown cmd: $cmd")
+        }
     }
 
     private fun ok() = JSONObject().put("ok", true)
@@ -308,9 +458,12 @@ class AgentAccessibilityService : AccessibilityService() {
         add("screen", "", "visible text elements + bounds + clickability (JSON)")
         add("tree", "[maxDepth]", "active window hierarchy (JSON)")
         add("launch", "uri", "open ACTION_VIEW intent", "works where shell am start is OEM-blocked")
+        add("session", "\"desc\" [seconds]", "request user consent overlay — REQUIRED before any read/click/type/launch; blocks up to 120s waiting for Approve/Deny")
+        add("status", "", "current session state (active, expiry, pending prompt)")
         return ok().put("commands", cmds)
             .put("gesturesBlocked", gesturesBlocked)
-            .put("note", "gesturesBlocked is learned: first cancelled gesture flips it; tap/swipe self-disable, click remains primary")
+            .put("consentGate", true)
+            .put("note", "consent-gated: screen/tree/click/clickId/text/tap/longPress/swipe/key/launch require an approved session; agentctl session requests one via full-screen overlay. gesturesBlocked is learned: first cancelled gesture flips it.")
     }
 
     /**
