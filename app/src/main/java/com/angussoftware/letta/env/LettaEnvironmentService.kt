@@ -86,6 +86,14 @@ class LettaEnvironmentService : Service() {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
+        // agentctl notify: title/text extras on a broadcast routed here
+        if (intent?.action == "com.angussoftware.letta.env.AGENT_NOTIFY") {
+            postAgentAlert(
+                intent.getStringExtra("title") ?: "Agent",
+                intent.getStringExtra("text") ?: "")
+            return START_NOT_STICKY
+        }
+
         when (intent?.action) {
             ACTION_UPGRADE -> handleUpgradeIntent()
             ACTION_RESTART -> handleRestartIntent()
@@ -366,6 +374,27 @@ class LettaEnvironmentService : Service() {
                 "await writeFile15(targetPath, contents, { flag: \"wx\" });")
             patched++
         }
+        // 0.33.x: identifiers renamed (link4/writeFile14); publishInitializedFile
+        // writes a .candidate then hard-links. O_EXCL create is equally atomic
+        // and Android-legal. Verified live on 0.33.2 (Sep 25 2026 fix).
+        if ("await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);" in out) {
+            out = out.replace(
+                "await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);",
+                "await writeFile14(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage; O_EXCL create is equally atomic\n    // link4 removed for Android")
+            patched++
+        }
+        // Generic future-proof fallback: any "await linkN(candidatePath, targetPath)"
+        // preceded by a candidate write — swap to direct O_EXCL create.
+        Regex("""await (writeFile\d+)\(candidatePath, contents, \{ flag: "wx" \}\);\s*\n(\s*)await link\d+\(candidatePath, targetPath\);""")
+            .findAll(out).toList().let { matches ->
+                if (matches.isNotEmpty() && patched == 0) {
+                    for (m in matches) {
+                        out = out.replaceRange(m.range,
+                            "await ${m.groupValues[1]}(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage\n${m.groupValues[2]}// link removed for Android")
+                        patched++
+                    }
+                }
+            }
         if ("#!/bin/sh\nexec " in out) {
             out = out.replace("#!/bin/sh\nexec ", "#!/system/bin/sh\nexec ")
             patched++
@@ -807,6 +836,16 @@ class LettaEnvironmentService : Service() {
         git.setExecutable(true, false)
         log("git wrapper installed")
 
+        // agentctl: agent-side client for the accessibility command channel
+        // (tap/swipe/text/screen-tree) + am/pm/notify passthroughs. Always
+        // rewrite — same policy as dx. Source: app/src/main/assets/agentctl.sh.
+        val agentctl = File(binDir, "agentctl")
+        assets.open("agentctl.sh").use { input ->
+            agentctl.outputStream().use { output -> input.copyTo(output) }
+        }
+        agentctl.setExecutable(true, false)
+        log("agentctl installed")
+
         // git payload tarballs staged to the filesDir ROOT under their exact
         // asset names — the wrapper looks for $FILES/git-arm64.tar.gz and
         // $FILES/proot-aarch64.tar.gz (offline first-run install; falls back
@@ -908,8 +947,32 @@ class LettaEnvironmentService : Service() {
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)
+        // Agent alerts (agentctl notify): heads-up, makes noise — this is the
+        // channel the agent uses to reach the human from the environment.
+        val alerts = NotificationChannel(
+            "letta-env-agent-alerts",
+            "Agent Alerts",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Messages the agent sends you from the environment (agentctl notify)"
+        }
+        nm.createNotificationChannel(alerts)
         // Remove the pre-v0.2.3 generic channel so it does not linger in system settings.
         nm.deleteNotificationChannel("letta-env")
+    }
+
+    /** Post an agent-originated alert (from agentctl notify via broadcast). */
+    private fun postAgentAlert(title: String, text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        val n = android.app.Notification.Builder(this, "letta-env-agent-alerts")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setContentIntent(contentIntent())
+            .build()
+        nm.notify(7000 + (System.currentTimeMillis() % 1000).toInt(), n)
     }
 
     private fun contentIntent(): PendingIntent {

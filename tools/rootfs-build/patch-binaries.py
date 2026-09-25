@@ -120,6 +120,23 @@ def main(rootfs):
         s = s.replace("await link3(candidatePath, targetPath);",
                       'await writeFile15(targetPath, contents, { flag: "wx" });', 1)
         n += 1
+    # 0.33.x publishInitializedFile: identifiers renamed (link4/writeFile14).
+    # Verified live on 0.33.2 (Sep 25 2026): unpatched, the listener lock
+    # EACCES-kills the server on every start (hard links forbidden on
+    # app_data_file). O_EXCL create is equally atomic and Android-legal.
+    if 'await writeFile14(candidatePath, contents, { flag: "wx" });\n    await link4(candidatePath, targetPath);' in s:
+        s = s.replace(
+            'await writeFile14(candidatePath, contents, { flag: "wx" });\n    await link4(candidatePath, targetPath);',
+            'await writeFile14(targetPath, contents, { flag: "wx" }); // ANDROID: link() forbidden on app storage; O_EXCL create is equally atomic\n    // link4 removed for Android', 1)
+        n += 1
+    # Generic future-proof fallback: any writeFileN(candidate)+linkN(candidate)
+    # pair -> direct O_EXCL create (survives identifier renames upstream).
+    if n == 0:
+        import re as _re
+        _pat = _re.compile(r'await (writeFile\d+)\(candidatePath, contents, \{ flag: "wx" \}\);\s*\n(\s*)await link\d+\(candidatePath, targetPath\);')
+        for _m in list(_pat.finditer(s)):
+            s = s[:_m.start()] + f'await {_m.group(1)}(targetPath, contents, {{ flag: "wx" }}); // ANDROID: link() forbidden on app storage\n{_m.group(2)}// link removed for Android' + s[_m.end():]
+            n += 1
     print(f"  letta.js: {n} link site(s) patched")
 
     print("5. letta.js Android shell spawn sites")
