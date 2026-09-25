@@ -79,6 +79,7 @@ class MainActivity : android.app.Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var statusDot: TextView
     private lateinit var statusLine: TextView
+    private lateinit var versionLine: TextView
     private lateinit var envLine: TextView
     private var a11yDotView: TextView? = null
     private var a11yTextView: TextView? = null
@@ -253,6 +254,12 @@ class MainActivity : android.app.Activity() {
         keyLine.tag = "keyline"
         statusCol.addView(statusLine)
         statusCol.addView(keyLine)
+        // Installed letta-code version + upstream latest (checked async; refreshed each tick).
+        versionLine = TextView(this).apply {
+            textSize = 12f
+            setTextColor(C.textSecondary)
+        }
+        statusCol.addView(versionLine)
         statusCard.addView(statusDot)
         statusCard.addView(statusCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(statusCard)
@@ -266,7 +273,7 @@ class MainActivity : android.app.Activity() {
                 cornerRadius = dp(12).toFloat()
             }
             minimumHeight = dp(48)
-            setPadding(pad, dp(10), pad, dp(10))
+            setPadding(pad, dp(14), pad, dp(14))
             gravity = Gravity.CENTER_VERTICAL
             isClickable = true
             foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
@@ -320,7 +327,7 @@ class MainActivity : android.app.Activity() {
         val rekeyBtn = actionButton("Key / Name").apply {
             setOnClickListener { showOnboarding() }
         }
-        val upgradeBtn = actionButton("Upgrade").apply {
+        val upgradeBtn = actionButton("Upgrade letta version").apply {
             setOnClickListener {
                 android.app.AlertDialog.Builder(this@MainActivity)
                     .setTitle("Upgrade letta-code?")
@@ -533,6 +540,62 @@ class MainActivity : android.app.Activity() {
         nm.notify(6100, n)
     }
 
+    // ---- letta-code version indicator ------------------------------------------------
+    // Installed version read from the rootfs package.json (same source the
+    // upgrade path uses); latest from the npm registry, fetched async and
+    // cached for an hour (avoid hammering the registry every 2s tick).
+
+    @Volatile private var latestVersion: String? = null
+    @Volatile private var latestCheckedAt: Long = 0
+
+    private fun installedVersion(): String = try {
+        val pkgJson = File(filesDir, "rootfs/usr/local/lib/node_modules/@letta-ai/letta-code/package.json")
+        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(pkgJson.readText())
+            ?.groupValues?.get(1) ?: "unknown"
+    } catch (_: Exception) { "unknown" }
+
+    private fun fetchLatestVersion() {
+        val now = System.currentTimeMillis()
+        if (latestVersion != null && now - latestCheckedAt < 3_600_000) return
+        latestCheckedAt = now
+        Thread {
+            try {
+                val url = java.net.URL("https://registry.npmjs.org/@letta-ai/letta-code/latest")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 8000; conn.readTimeout = 8000
+                val body = conn.inputStream.bufferedReader().readText()
+                Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
+                    ?.let { latestVersion = it }
+            } catch (_: Exception) { /* offline or blocked — keep previous value */ }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun renderVersionLine() {
+        fetchLatestVersion()
+        val installed = installedVersion()
+        val latest = latestVersion
+        versionLine.apply {
+            when {
+                installed == "unknown" -> {
+                    text = "letta-code: not installed"
+                    setTextColor(C.textSecondary)
+                }
+                latest == null -> {
+                    text = "letta-code $installed"
+                    setTextColor(C.textSecondary)
+                }
+                latest != installed -> {
+                    text = "letta-code $installed — $latest available"
+                    setTextColor(C.warn)
+                }
+                else -> {
+                    text = "letta-code $installed (up to date)"
+                    setTextColor(C.ok)
+                }
+            }
+        }
+    }
+
     private fun isBatteryUnrestricted(): Boolean {
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
         return pm.isIgnoringBatteryOptimizations(packageName)
@@ -638,6 +701,7 @@ class MainActivity : android.app.Activity() {
             (statusLine.parent as? LinearLayout)?.getChildAt(1)?.let { v ->
                 (v as? TextView)?.text = "key: ${maskKey(prefs.getString(PREF_KEY, ""))}"
             }
+            renderVersionLine()
             // Battery banner: re-evaluated each tick; clears itself when granted.
             // Phone-control card: live state each tick (grant/revoke reflects in 2s)
             a11yDotView?.setTextColor(if (isA11yEnabled()) C.ok else C.warn)
