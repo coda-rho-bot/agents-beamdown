@@ -48,6 +48,9 @@ case "${1:-help}" in
     screen)    send '{"cmd":"screenshot-text"}' ;;
     tree)      send "{\"cmd\":\"tree\",\"maxDepth\":${2:-18}}" ;;
     launch)    send "{\"cmd\":\"launch\",\"uri\":\"$2\"}" ;;
+    status)    send '{"cmd":"status"}' ;;
+    commands)  send '{"cmd":"commands"}' ;;
+    capabilities) send '{"cmd":"capabilities"}' ;;
     session)
         SECS="${3:-300}"
         DESC=$(printf '%s' "$2" | sed 's/"/\\"/g')
