@@ -149,8 +149,12 @@ class MainActivity : android.app.Activity() {
         val keyLabel = TextView(this).apply {
             text = "API key"; textSize = 12f; setTextColor(C.textSecondary)
         }
+        val savedKey = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "")
         val keyField = EditText(this).apply {
-            hint = "sk-let-…"
+            // Pre-fill saved key (masked) on re-key so the user can change
+            // ONLY the env name without re-entering the key (watch parity).
+            hint = if (savedKey.isNullOrBlank()) "sk-let-…" else "API key — saved"
+            setText(savedKey ?: "")
             setHintTextColor(C.textSecondary)
             setTextColor(C.textPrimary)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
@@ -508,7 +512,14 @@ class MainActivity : android.app.Activity() {
 
     /** Shared onboarding save+start (used by phone and watch variants). */
     private fun saveOnboarding(key: String, env: String) {
-        if (!KEY_REGEX.matches(key)) {
+        // If the user left the key field empty but a saved key exists, they
+        // are renaming only — keep the existing key. (The field pre-fills the
+        // saved key, so empty means explicitly cleared; either way the saved
+        // key is the safe default for a name-only change.)
+        val effectiveKey = key.ifBlank {
+            getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "") ?: ""
+        }
+        if (!KEY_REGEX.matches(effectiveKey)) {
             Toast.makeText(this, "Key must look like sk-let-… (letters/digits/dashes, 20+ chars)", Toast.LENGTH_LONG).show()
             return
         }
@@ -517,7 +528,7 @@ class MainActivity : android.app.Activity() {
             return
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putString(PREF_KEY, key)
+            .putString(PREF_KEY, effectiveKey)
             .putString(PREF_ENV, env)
             .apply()
         // Re-key/rename with a live server: stop it FIRST so the new
