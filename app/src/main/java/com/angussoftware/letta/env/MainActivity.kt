@@ -156,6 +156,9 @@ class MainActivity : android.app.Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSingleLine()
+            // Deterministic mask: setSingleLine() after inputType can clobber
+            // the password variation — transformationMethod survives ordering.
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
         }
         val envLabel = TextView(this).apply {
             text = "Environment name"; textSize = 12f; setTextColor(C.textSecondary)
@@ -450,6 +453,9 @@ class MainActivity : android.app.Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSingleLine()
+            // Deterministic mask — setSingleLine() can clobber the password
+            // variation from inputType; this survives ordering (watch field).
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
             textSize = 13f
             includeFontPadding = false
             minHeight = dp(44)
