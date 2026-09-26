@@ -105,17 +105,8 @@ class MainActivity : android.app.Activity() {
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
             if (isWatch()) showOnboardingWatch() else showOnboarding()
         } else {
-            // Configured: ensure the service is up. Covers post-install
-            // relaunches and WearOS idle-kills where opening the app was
-            // previously the ONLY manual recovery path (monkey relaunch
-            // often didn't restart the FGS — autostart gap, Sep 25).
-            // User-initiated Stop is respected: service start intent
-            // re-asserts state without relaunching a stopped server
-            // unless config changed (see handleStartIntent).
-            // Configured: ensure the service is up (autostart gap fix) via
-            // the marker-respecting implicit path — app-open never overrides
-            // an explicit user Stop.
-            ensureEnvironment()
+            // Service start deferred to onResume (foreground) — starting the
+            // FGS from onCreate crashes on One UI pre-resume (Sep 26).
             if (isWatch()) showMainWatch() else showMain()
         }
     }
@@ -1121,7 +1112,18 @@ class MainActivity : android.app.Activity() {
     override fun onResume() {
         super.onResume()
         handler.post(refresh)
+        // Autostart (once per process): MUST run from a resumed/foreground
+        // activity — starting the FGS from onCreate (pre-resume) makes the
+        // service's startForeground throw SecurityException on One UI
+        // (crash-looped the phone app at every launch, Sep 26).
+        if (!autostartDone) {
+            autostartDone = true
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            if (!prefs.getString(PREF_KEY, "").isNullOrBlank()) ensureEnvironment()
+        }
     }
+
+    private var autostartDone = false
 
     override fun onPause() {
         super.onPause()
