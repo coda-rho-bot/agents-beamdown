@@ -68,6 +68,7 @@ class LettaEnvironmentService : Service() {
         const val PREF_KEY = "api_key"
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
         const val ACTION_RESTART = "com.angussoftware.letta.env.action.RESTART"
+        const val ACTION_START_EXPLICIT = "com.angussoftware.letta.env.action.START_EXPLICIT"
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
 
@@ -97,6 +98,19 @@ class LettaEnvironmentService : Service() {
         // service — no new always-running process (spec Sep 30).
         UpdateManager.startPeriodicChecks(this)
 
+        // Stale-status invalidation: an install/kill leaves status.txt claiming
+        // "online" from a dead process. On any service start, if no server
+        // process is alive, rewrite status from reality BEFORE anything else
+        // (Sep 25: watch showed "online" for 25 min with no process).
+        if (proc?.isAlive != true) {
+            val sf = File(filesDir, "status.txt")
+            val cur = if (sf.exists()) sf.readText() else ""
+            if (cur.contains("online") || cur.contains("registered")) {
+                setStatus("stopped — restarting (stale online status cleared)")
+                log("STATUS: cleared stale '${cur.lineSequence().firstOrNull { it.startsWith("state=") }}' (no live process)")
+            }
+        }
+
         // agentctl notify: title/text extras on a broadcast routed here
         if (intent?.action == "com.angussoftware.letta.env.AGENT_NOTIFY") {
             postAgentAlert(
@@ -108,6 +122,12 @@ class LettaEnvironmentService : Service() {
         when (intent?.action) {
             ACTION_UPGRADE -> handleUpgradeIntent()
             ACTION_RESTART -> handleRestartIntent()
+            ACTION_START_EXPLICIT -> {
+                // Explicit Start button: clears the user-stop marker so the
+                // server (re)launches even if previously stopped by the user.
+                File(filesDir, ".user-stopped").delete()
+                handleStartIntent()
+            }
             else -> handleStartIntent()
         }
         return START_STICKY
@@ -122,6 +142,16 @@ class LettaEnvironmentService : Service() {
      * forever while the server ran fine — review task_93 #2).
      */
     private fun handleStartIntent() {
+        // User-stop is sticky across app re-opens: if the user pressed Stop,
+        // opening the app must NOT silently resurrect the server. The marker
+        // is cleared by the Start button (explicit user intent) and by
+        // saveOnboarding (config change = definite restart).
+        val stopMarker = File(filesDir, ".user-stopped")
+        if (stopMarker.exists() && lifecycle.get() == State.IDLE) {
+            log("start intent with user-stop marker and no server — staying stopped (explicit Start clears)")
+            updateNotification("Stopped — tap Start to run")
+            return
+        }
         when (lifecycle.get()) {
             State.IDLE -> {
                 if (!lifecycle.compareAndSet(State.IDLE, State.STARTING)) return handleStartIntent()
@@ -375,37 +405,75 @@ class LettaEnvironmentService : Service() {
         val s = lettaJs.readText()
         var patched = 0
         var out = s
-        if ("linkSync(candidatePath, targetPath);" in out) {
-            out = out.replace("linkSync(candidatePath, targetPath);",
-                "writeFileSync4(targetPath, ownerToken, { flag: \"wx\" });")
-            patched++
-        }
-        if ("await link3(candidatePath, targetPath);" in out) {
-            out = out.replace("await link3(candidatePath, targetPath);",
-                "await writeFile15(targetPath, contents, { flag: \"wx\" });")
-            patched++
-        }
-        // 0.33.x: identifiers renamed (link4/writeFile14); publishInitializedFile
-        // writes a .candidate then hard-links. O_EXCL create is equally atomic
-        // and Android-legal. Verified live on 0.33.2 (Sep 25 2026 fix).
-        if ("await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);" in out) {
-            out = out.replace(
-                "await writeFile14(candidatePath, contents, { flag: \"wx\" });\n    await link4(candidatePath, targetPath);",
-                "await writeFile14(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage; O_EXCL create is equally atomic\n    // link4 removed for Android")
-            patched++
-        }
-        // Generic future-proof fallback: any "await linkN(candidatePath, targetPath)"
-        // preceded by a candidate write — swap to direct O_EXCL create.
-        Regex("""await (writeFile\d+)\(candidatePath, contents, \{ flag: "wx" \}\);\s*\n(\s*)await link\d+\(candidatePath, targetPath\);""")
-            .findAll(out).toList().let { matches ->
-                if (matches.isNotEmpty() && patched == 0) {
-                    for (m in matches) {
-                        out = out.replaceRange(m.range,
-                            "await ${m.groupValues[1]}(targetPath, contents, { flag: \"wx\" }); // ANDROID: link() forbidden on app storage\n${m.groupValues[2]}// link removed for Android")
-                        patched++
-                    }
+
+        // --- Android link() rewrite -------------------------------------
+        // SELinux denies hard links on app_data_file. Upstream uses the
+        // write-temp-then-link atomic-publish idiom in FIVE places (0.33.x):
+        //   1. publishExclusive (file-lock.ts)          — fleet-shared memory
+        //      checkout locks, agent locks — KILLS EVERY BASH CALL when unpatched
+        //   2. createInitializedTokenLinkSync (remote-settings-lock.ts)
+        //   3. createInitializedTokenLink     (remote-settings-lock.ts)
+        //   4. publishInitializedFile         (manual-instance-lock.ts)
+        //   5. legacy channel-routing migration (linkSync(legacyPath, path))
+        // O_EXCL create (flag:"wx") is equally atomic and Android-legal.
+        //
+        // Strategy: identifier-agnostic regexes so upstream renames
+        // (writeFile14→writeFile17 etc.) don't silently break the patcher —
+        // the OLD exact-string patches matched 0.33.2 partially and injected
+        // stale identifiers from 0.31.x scopes (latent ReferenceErrors).
+
+        // (a) Generic: writeFileN(candidate/temp, X, {flag:"wx"}) followed by
+        // linkN(same, target) -> write directly to target with O_EXCL.
+        Regex("""(await (?:writeFile\d+)\((\w+), ([\w.]+), \{ flag: "wx" \}\);)\s*\n(\s*)await (?:link\d*)\(\2, (\w+)\);""")
+            .findAll(out).toList().let { ms ->
+                for (m in ms) {
+                    out = out.replaceRange(m.range,
+                        "${m.groupValues[1].replace(m.groupValues[2], m.groupValues[5])} // ANDROID: link() forbidden on app storage; O_EXCL create is equally atomic\n${m.groupValues[4]}// link removed for Android")
+                    patched++
                 }
             }
+        // (b) Sync variant: writeFileSyncN(candidate, X, {flag:"wx"}) + linkSync.
+        Regex("""((?:writeFileSync\d*)\((\w+), ([\w.]+), \{ flag: "wx" \}\);)\s*\n(\s*)(?:linkSync)\(\2, (\w+)\);""")
+            .findAll(out).toList().let { ms ->
+                for (m in ms) {
+                    out = out.replaceRange(m.range,
+                        "${m.groupValues[1].replace(m.groupValues[2], m.groupValues[5])} // ANDROID: link() forbidden\n${m.groupValues[4]}// linkSync removed for Android")
+                    patched++
+                }
+            }
+        // (c) publishExclusive (file-lock.ts): writeFile3(temporaryPath, payload, "utf-8")
+        //     then link(temporaryPath, path) — payload already in memory; retry
+        //     as O_EXCL write, EEXIST = lock held (same semantics as link EEXIST).
+        if ("""await link\(temporaryPath, path8\);""" in out) {
+            out = out.replace(
+                """  try {
+    await link(temporaryPath, path8);
+    return true;
+  } catch (error4) {
+    if (error4?.code !== "EEXIST")
+      throw error4;
+    return false;
+  } finally {""",
+                """  try {
+    await writeFile3(path8, payload, { flag: "wx" });
+    return true;
+  } catch (error4) {
+    if (error4?.code !== "EEXIST")
+      throw error4;
+    return false;
+  } finally {""")
+            patched++
+        }
+        // (d) Legacy channel-routing migration: linkSync(legacyPath, path8) —
+        //     non-locking file promotion; copy-then-unlink is fine here.
+        if ("""fs8.linkSync(legacyPath, path8);""" in out) {
+            out = out.replace(
+                """fs8.linkSync(legacyPath, path8);""",
+                """fs8.copyFileSync(legacyPath, path8); // ANDROID: link() forbidden; copy+unlink for non-atomic migration""")
+            patched++
+        }
+
+        // --- Launcher / interpreter fixes --------------------------------
         if ("#!/bin/sh\nexec " in out) {
             out = out.replace("#!/bin/sh\nexec ", "#!/system/bin/sh\nexec ")
             patched++
@@ -562,6 +630,39 @@ class LettaEnvironmentService : Service() {
         // tailer alive forever, double-appending once the new launch truncated
         // server-stdout.log past its offset (review task_93 #9).
         val outLogFile = java.io.File(filesDir, "server-stdout.log")
+
+        // Cloud-connection watchdog: the server can be process-alive while its
+        // cloud WebSocket is half-dead (killed socket, stale registration —
+        // observed Sep 25: local traffic flowed, cloud said disconnected, app
+        // unselectable as environment). Signal: server-stdout.log stops growing
+        // while RUNNING. The letta server logs at least one lifecycle line per
+        // ~30s (pong/recv) when healthy; silence past SILENCE_LIMIT = dead link.
+        // Remedy: destroy the process; the worker's pending-RESTART loop
+        // relaunches fresh and re-registers.
+        val watchdog = Thread {
+            val silenceLimitMs = 5 * 60_000L
+            var quietMs = 0L
+            while (p.isAlive && pendingOp.get() == null) {
+                Thread.sleep(30_000)
+                val lastWrite = outLogFile.lastModified()
+                quietMs = if (lastWrite == 0L) quietMs + 30_000 else System.currentTimeMillis() - lastWrite
+                if (quietMs >= silenceLimitMs) {
+                    log("WATCHDOG: server silent ${quietMs / 1000}s while running — cloud link presumed dead; restarting")
+                    setStatus("restarting — cloud connection silent")
+                    pendingOp.compareAndSet(null, PendingOp.RESTART)
+                    try { p.destroy() } catch (_: Exception) {}
+                    return@Thread
+                }
+            }
+        }
+        watchdog.isDaemon = true
+        watchdog.start()
+
+        // Output goes to a file (valid fd for the child); tail it for status.
+        // NOTE: tailer binds to THIS process (local val) — the old loop read
+        // the shared `proc` var, so an upgrade's proc=null left the stale
+        // tailer alive forever, double-appending once the new launch truncated
+        // server-stdout.log past its offset (review task_93 #9).
         val tailer = Thread {
             var pos = 0L
             while (p.isAlive) {
@@ -1030,6 +1131,9 @@ class LettaEnvironmentService : Service() {
         pendingOp.set(PendingOp.SHUTDOWN)
         lifecycle.set(State.STOPPING)
         setStatus("stopped (by user)")
+        // Sticky stop marker: app re-opens must not resurrect the server
+        // (only the explicit Start button or a config change clears it).
+        runCatching { File(filesDir, ".user-stopped").writeText(Date().toString()) }
         try { proc?.destroy() } catch (_: Exception) {}
         worker?.interrupt() // advisory: waitFor is not interruptible
         super.onDestroy()

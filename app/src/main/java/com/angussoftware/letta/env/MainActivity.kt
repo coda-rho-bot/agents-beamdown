@@ -105,6 +105,14 @@ class MainActivity : android.app.Activity() {
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
             if (isWatch()) showOnboardingWatch() else showOnboarding()
         } else {
+            // Configured: ensure the service is up. Covers post-install
+            // relaunches and WearOS idle-kills where opening the app was
+            // previously the ONLY manual recovery path (monkey relaunch
+            // often didn't restart the FGS — autostart gap, Sep 25).
+            // User-initiated Stop is respected: service start intent
+            // re-asserts state without relaunching a stopped server
+            // unless config changed (see handleStartIntent).
+            startEnvironment()
             if (isWatch()) showMainWatch() else showMain()
         }
     }
@@ -536,6 +544,9 @@ class MainActivity : android.app.Activity() {
         // server running — review task_92 #1 / task_93 #3).
         stopService(Intent(this, LettaEnvironmentService::class.java))
         ensureRuntimePermissions()
+        // Config change = definite restart: clear any user-stop marker so
+        // the launch below isn't filtered by the sticky-stop guard.
+        runCatching { File(filesDir, ".user-stopped").delete() }
         if (isWatch()) showMainWatch() else showMain()
         startEnvironment()
     }
@@ -1083,7 +1094,9 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun startEnvironment() {
-        startForegroundService(Intent(this, LettaEnvironmentService::class.java))
+        startForegroundService(Intent(this, LettaEnvironmentService::class.java).apply {
+            action = LettaEnvironmentService.ACTION_START_EXPLICIT
+        })
     }
 
     override fun onResume() {
