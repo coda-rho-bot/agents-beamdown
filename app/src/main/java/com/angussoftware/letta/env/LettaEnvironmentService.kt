@@ -381,7 +381,12 @@ class LettaEnvironmentService : Service() {
         // 3. Re-apply Android patches to the fresh letta.js (hardlink locks
         //    are denied by SELinux on app_data_file). Mirror of patches #4 and
         //    #5 in tools/rootfs-build/patch-binaries.py — keep both in sync.
-        val applied = applyLettaJsPatches(nodeModules)
+        // fs-shim.js handles ALL link() emulation at runtime now. String
+        // patches CONFLICT with it (patched sites double-create: wx-write
+        // from the patch + emulated link's own wx-write = EEXIST crash on
+        // boot, Sep 26). Only the launcher/interpreter patches remain needed;
+        // the link rewrites must NOT run when the shim is deployed.
+        val applied = applyLettaJsPatches(nodeModules, linksHandled = true)
         if (applied == 0) {
             log("UPGRADE: WARNING — 0 patch sites found in new letta.js; " +
                 "lock-file hardlinks will fail under SELinux. Upstream code changed — " +
@@ -408,7 +413,7 @@ class LettaEnvironmentService : Service() {
      *  - BashSession persistent-shell spawn "/bin/bash" -> SHELL-aware —
      *    absolute /bin/bash does not exist on the host (1 site, 0.32.x only).
      */
-    private fun applyLettaJsPatches(nodeModules: File): Int {
+    private fun applyLettaJsPatches(nodeModules: File, linksHandled: Boolean = false): Int {
         val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
         if (!lettaJs.exists()) {
             log("PATCH: letta.js not found")
@@ -419,6 +424,13 @@ class LettaEnvironmentService : Service() {
         var out = s
 
         // --- Android link() rewrite -------------------------------------
+        // DEPRECATED: fs-shim.js (NODE_OPTIONS preload) emulates link() at
+        // runtime. These string rewrites CONFLICT with it — a patched site
+        // writes the target with wx directly, then the shim's emulated link
+        // ALSO writes it → EEXIST where the caller expected success → boot
+        // crash (observed Sep 26 on watch upgrade). linksHandled=true skips
+        // them all; kept only for emergency use (linksHandled=false).
+        if (!linksHandled) {
         // SELinux denies hard links on app_data_file. Upstream uses the
         // write-temp-then-link atomic-publish idiom in FIVE places (0.33.x):
         //   1. publishExclusive (file-lock.ts)          — fleet-shared memory
@@ -480,12 +492,13 @@ class LettaEnvironmentService : Service() {
         }
         // (d) Legacy channel-routing migration: linkSync(legacyPath, path8) —
         //     non-locking file promotion; copy-then-unlink is fine here.
-        if ("""fs8.linkSync(legacyPath, path8);""" in out) {
+        if ("fs8.linkSync(legacyPath, path8);" in out) {
             out = out.replace(
-                """fs8.linkSync(legacyPath, path8);""",
-                """fs8.copyFileSync(legacyPath, path8); // ANDROID: link() forbidden; copy+unlink for non-atomic migration""")
+                "fs8.linkSync(legacyPath, path8);",
+                "fs8.copyFileSync(legacyPath, path8); // ANDROID: link() forbidden; copy+unlink for non-atomic migration")
             patched++
         }
+        } // end if (!linksHandled)
 
         // --- Launcher / interpreter fixes --------------------------------
         if ("#!/bin/sh\nexec " in out) {
@@ -570,7 +583,9 @@ class LettaEnvironmentService : Service() {
         // Re-apply letta.js patches on every start: npm-upgraded installs
         // (upgrade button) land unpatched until the NEXT upgrade, and the
         // launcher/interpreter fixes are load-bearing for the Bash tool.
-        applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"))
+        // fs-shim handles link() at runtime; on fresh installs skip the
+        // link-string patches entirely (they conflict — see upgrade path).
+        applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"), linksHandled = true)
 
         val libPath = libDir.absolutePath
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
