@@ -444,7 +444,9 @@ class LettaEnvironmentService : Service() {
         // (c) publishExclusive (file-lock.ts): writeFile3(temporaryPath, payload, "utf-8")
         //     then link(temporaryPath, path) — payload already in memory; retry
         //     as O_EXCL write, EEXIST = lock held (same semantics as link EEXIST).
-        if ("""await link\(temporaryPath, path8\);""" in out) {
+        //     NOTE: raw strings need NO escaping for parens (a literal \( here
+        //     broke containment matching on the first cut).
+        if ("await link(temporaryPath, path8);" in out) {
             out = out.replace(
                 """  try {
     await link(temporaryPath, path8);
