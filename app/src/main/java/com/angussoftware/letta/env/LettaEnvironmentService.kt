@@ -69,6 +69,7 @@ class LettaEnvironmentService : Service() {
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
         const val ACTION_RESTART = "com.angussoftware.letta.env.action.RESTART"
         const val ACTION_START_EXPLICIT = "com.angussoftware.letta.env.action.START_EXPLICIT"
+        const val ACTION_STOP_EXPLICIT = "com.angussoftware.letta.env.action.STOP_EXPLICIT"
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
 
@@ -127,6 +128,17 @@ class LettaEnvironmentService : Service() {
                 // server (re)launches even if previously stopped by the user.
                 File(filesDir, ".user-stopped").delete()
                 handleStartIntent()
+            }
+            ACTION_STOP_EXPLICIT -> {
+                // Explicit Stop button: sticky marker so app re-opens don't
+                // resurrect. onDestroy does NOT set the marker — install-kills
+                // also run onDestroy and must not look like user stops.
+                runCatching { File(filesDir, ".user-stopped").writeText(Date().toString()) }
+                pendingOp.set(PendingOp.SHUTDOWN)
+                lifecycle.compareAndSet(State.IDLE, State.STOPPING)
+                setStatus("stopped (by user)")
+                try { proc?.destroy() } catch (_: Exception) {}
+                stopSelf()
             }
             else -> handleStartIntent()
         }
@@ -1127,15 +1139,13 @@ class LettaEnvironmentService : Service() {
 
     override fun onDestroy() {
         // Review #18 F2/F3 (Angus): Stop must be terminal. Set SHUTDOWN FIRST
-        // so the worker's drain loop cannot relaunch (a pending UPGRADE used
-        // to resurrect the server the user just stopped), and mark STOPPING
-        // so lifecycle reflects reality between here and the worker's finally.
+        // so the worker's drain loop cannot relaunch. onDestroy also runs for
+        // install-kills and system shutdowns — the user-stop MARKER is only
+        // written by ACTION_STOP_EXPLICIT (the Stop button), so those paths
+        // don't masquerade as user stops.
         pendingOp.set(PendingOp.SHUTDOWN)
         lifecycle.set(State.STOPPING)
-        setStatus("stopped (by user)")
-        // Sticky stop marker: app re-opens must not resurrect the server
-        // (only the explicit Start button or a config change clears it).
-        runCatching { File(filesDir, ".user-stopped").writeText(Date().toString()) }
+        if (lifecycle.get() != State.STOPPING) setStatus("stopped")
         try { proc?.destroy() } catch (_: Exception) {}
         worker?.interrupt() // advisory: waitFor is not interruptible
         super.onDestroy()

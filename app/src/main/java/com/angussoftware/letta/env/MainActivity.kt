@@ -112,7 +112,10 @@ class MainActivity : android.app.Activity() {
             // User-initiated Stop is respected: service start intent
             // re-asserts state without relaunching a stopped server
             // unless config changed (see handleStartIntent).
-            startEnvironment()
+            // Configured: ensure the service is up (autostart gap fix) via
+            // the marker-respecting implicit path — app-open never overrides
+            // an explicit user Stop.
+            ensureEnvironment()
             if (isWatch()) showMainWatch() else showMain()
         }
     }
@@ -356,7 +359,7 @@ class MainActivity : android.app.Activity() {
             ensureRuntimePermissions(); startEnvironment()
         }
         val stopPill = watchPill("Stop", style = 2) {
-            stopService(Intent(this, LettaEnvironmentService::class.java))
+            stopEnvironment()
         }
         val upgradePill = watchPill("Upgrade letta") {
             // No AlertDialog on watch — direct action + Toast (the upgrade
@@ -542,7 +545,7 @@ class MainActivity : android.app.Activity() {
         // Re-key/rename with a live server: stop it FIRST so the new
         // config actually takes effect (old flow left the old-key
         // server running — review task_92 #1 / task_93 #3).
-        stopService(Intent(this, LettaEnvironmentService::class.java))
+        stopEnvironment()
         ensureRuntimePermissions()
         // Config change = definite restart: clear any user-stop marker so
         // the launch below isn't filtered by the sticky-stop guard.
@@ -663,7 +666,7 @@ class MainActivity : android.app.Activity() {
             }
         }
         val stopBtn = actionButton("Stop", danger = true).apply {
-            setOnClickListener { stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java)) }
+            setOnClickListener { stopEnvironment() }
         }
         row1.addView(startBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         row1.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
@@ -1093,9 +1096,25 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    /** Explicit user Start (button / save) — clears any user-stop marker. */
     private fun startEnvironment() {
         startForegroundService(Intent(this, LettaEnvironmentService::class.java).apply {
             action = LettaEnvironmentService.ACTION_START_EXPLICIT
+        })
+    }
+
+    /** App-open ensure-start: does NOT clear the user-stop marker — opening
+     *  the app after an explicit Stop must not resurrect the server, while
+     *  post-install relaunches and idle-kill recovery still bring it up. */
+    private fun ensureEnvironment() {
+        startForegroundService(Intent(this, LettaEnvironmentService::class.java))
+    }
+
+    /** Explicit user Stop — sticky across app re-opens (marker set by the
+     *  service; cleared by Start button or config change). */
+    private fun stopEnvironment() {
+        startForegroundService(Intent(this, LettaEnvironmentService::class.java).apply {
+            action = LettaEnvironmentService.ACTION_STOP_EXPLICIT
         })
     }
 
