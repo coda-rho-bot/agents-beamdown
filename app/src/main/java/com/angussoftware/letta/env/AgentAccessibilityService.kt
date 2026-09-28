@@ -310,8 +310,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 // a11y service IS the app uid — only in-process starts of the
                 // non-exported activity pass the uid check; shell/am cannot).
                 runCatching {
-                    startActivity(android.content.Intent(this, HCRequestActivity::class.java)
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    val i = android.content.Intent(this, MainActivity::class.java)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra("AUTO_HC_REQUEST", true)
+                    startActivity(i)
                     ok().put("launched", true)
                 }.fold({ it }, { err().put("error", "launch failed: ${it.message}") })
             }

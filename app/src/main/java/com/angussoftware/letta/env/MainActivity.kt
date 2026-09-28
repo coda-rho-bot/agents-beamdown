@@ -26,7 +26,29 @@ import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 
-class MainActivity : android.app.Activity() {
+class MainActivity : androidx.activity.ComponentActivity() {
+    // ComponentActivity (Sep 28): hosts the Health Connect permission
+    // REQUEST contract directly — intermediate translucent activities
+    // freeze at contract-launch (observed live: white screen + Samsung
+    // "not responding" surface, no system am_anr event).
+
+    private var hcAutoRequested = false
+    private val hcRequest = registerForActivityResult(
+        androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()
+    ) { /* result lands as grants; the 2s tick refreshes the row */ }
+
+    private fun hcRequestLaunch() {
+        runCatching {
+            hcRequest.launch(setOf(
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.HeartRateRecord::class),
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.StepsRecord::class),
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.SleepSessionRecord::class)))
+        }
+    }
+
 
     companion object {
         // Single source: LettaEnvironmentService.PREFS etc.
@@ -777,11 +799,14 @@ class MainActivity : android.app.Activity() {
             text = "Grant"
             textSize = 12f
             setOnClickListener {
-                // HCRequestActivity runs the real REQUEST contract — the only
-                // flow that makes the app appear in HC's app list and grants
-                // per-type access. (MANAGE_* intents from a plain Activity
-                // land on the app LIST, not our page — observed live Sep 28.)
-                startActivity(android.content.Intent(this@MainActivity, HCRequestActivity::class.java))
+                hcRequest.launch(androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.HeartRateRecord::class).let { hr ->
+                    setOf(hr,
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.StepsRecord::class),
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.SleepSessionRecord::class))
+                })
             }
         }
         val healthRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -1196,6 +1221,12 @@ class MainActivity : android.app.Activity() {
         // activity — starting the FGS from onCreate (pre-resume) makes the
         // service's startForeground throw SecurityException on One UI
         // (crash-looped the phone app at every launch, Sep 26).
+        // agentctl hcrequest path: launch the HC permission request once the
+        // activity is resumed (contract needs a RESUMED activity).
+        if (intent?.getBooleanExtra("AUTO_HC_REQUEST", false) == true && !hcAutoRequested) {
+            hcAutoRequested = true
+            hcRequestLaunch()
+        }
         if (!autostartDone) {
             autostartDone = true
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)

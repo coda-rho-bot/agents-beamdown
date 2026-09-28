@@ -60,6 +60,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Health Connect requires apps declaring health permissions to
+                 handle permission-usage viewing (the "see how this app uses
+                 your data" link from HC's UI). Without it, every read throws
+                 IllegalStateException: Incorrect health permission state. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
         </activity>
 
         <service
