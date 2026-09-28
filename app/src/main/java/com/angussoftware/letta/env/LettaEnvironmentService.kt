@@ -501,6 +501,20 @@ class LettaEnvironmentService : Service() {
         } // end if (!linksHandled)
 
         // --- Launcher / interpreter fixes --------------------------------
+        // Memory git hooks (Sep 28): letta.js hardcodes `#!/usr/bin/env bash`
+        // shebangs in its PRE/POST_COMMIT_HOOK_SCRIPT templates — regenerated
+        // on every startup, so patching hook files is futile. /usr/bin/env
+        // doesn't exist on Android → every commit fails with "cannot run
+        // .git/hooks/pre-commit" unless --no-verify. Retarget the shebang at
+        // our bash wrapper (kernel CAN exec /system/bin/sh scripts; the chain
+        // wrapper → loader → glibc bash works — verified arrays + git hooks).
+        // Exactly 2 occurrences in 0.33.x, both the hook templates.
+        val hookShebang = "#!/usr/bin/env bash\n"
+        val bashWrapper = File(filesDir, "bin/bash").absolutePath
+        if (hookShebang in out) {
+            out = out.replace(hookShebang, "#!$bashWrapper\n")
+            patched++
+        }
         if ("#!/bin/sh\nexec " in out) {
             out = out.replace("#!/bin/sh\nexec ", "#!/system/bin/sh\nexec ")
             patched++
@@ -976,6 +990,23 @@ class LettaEnvironmentService : Service() {
         )
         lettaBin.setExecutable(true, false)
         log("letta wrapper installed")
+
+        // `node` wrapper (Sep 28): letta.js's memory git hooks (pre-commit
+        // constraints validator, .cjs) invoke `node` from PATH. Spawned hook
+        // processes have no node otherwise — process.execPath is the loader
+        // chain and cannot be re-spawned raw. Same pattern as the letta
+        // wrapper but exec'ing arbitrary JS args (node script.cjs ...).
+        val nodeBin = File(binDir, "node")
+        nodeBin.writeText(
+            "#!/system/bin/sh\n" +
+            "export HOME=\"\${HOME:-${File(rootfsDir, "root").absolutePath}}\"\n" +
+            "export TMPDIR=\"\${TMPDIR:-${File(rootfsDir, "tmp").absolutePath}}\"\n" +
+            "export PATH=${binDir.absolutePath}:/system/bin:/system/xbin\n" +
+            "export UV_USE_IO_URING=0\n" +
+            "exec $loaderFlag ${File(libDir, "libnode.so").absolutePath} \"$@\"\n"
+        )
+        nodeBin.setExecutable(true, false)
+        log("node wrapper installed")
 
         // dx: agent-facing wrapper for running commands inside the proot
         // rootfs (apt, git, …) plus Android system tools via the /system
