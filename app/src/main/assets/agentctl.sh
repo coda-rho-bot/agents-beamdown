@@ -68,6 +68,7 @@ case "${1:-help}" in
         esac
         ;;
     location)   send '{"cmd":"location"}' ;;
+    hcrequest)  send '{"cmd":"hcrequest"}' ;;
     notifstatus) send '{"cmd":"notifstatus"}' ;;
     notiflist)  send '{"cmd":"notiflist"}' ;;
     session)

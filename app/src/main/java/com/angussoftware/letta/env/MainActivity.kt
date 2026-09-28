@@ -71,6 +71,8 @@ class MainActivity : android.app.Activity() {
     private var a11yDotView: TextView? = null
     private var a11yTextView: TextView? = null
     // Telemetry card rows (2s tick live-updates grant states).
+    private var healthGrantCount = 0
+    private var healthGrantCheckedAt = 0L
     private var healthTextView: TextView? = null
     private var locationTextView: TextView? = null
     private var notifTextView: TextView? = null
@@ -775,17 +777,11 @@ class MainActivity : android.app.Activity() {
             text = "Grant"
             textSize = 12f
             setOnClickListener {
-                // Health Connect grants flow through the PermissionController
-                // contract; on A14+ the framework onboarding intent also works.
-                // Launch the HC settings action — simplest reliable path.
-                runCatching {
-                    startActivity(android.content.Intent("android.health.connect.action.HEALTH_HOME_SETTINGS"))
-                }.onFailure {
-                    runCatching {
-                        startActivity(android.content.Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS")
-                            .putExtra("android.intent.extra.PACKAGE_NAME", packageName))
-                    }
-                }
+                // HCRequestActivity runs the real REQUEST contract — the only
+                // flow that makes the app appear in HC's app list and grants
+                // per-type access. (MANAGE_* intents from a plain Activity
+                // land on the app LIST, not our page — observed live Sep 28.)
+                startActivity(android.content.Intent(this@MainActivity, HCRequestActivity::class.java))
             }
         }
         val healthRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -1297,15 +1293,26 @@ class MainActivity : android.app.Activity() {
             }
             // Telemetry rows: live grant states (HC status is cheap; cache per tick)
             healthTextView?.let { tv ->
-                runCatching {
-                    val st = HealthReader.status(this)
-                    if (st.optBoolean("sdkAvailable")) {
-                        val granted = st.optJSONArray("granted")?.length() ?: 0
-                        tv.text = "Health: $granted read grants active"
-                        tv.setTextColor(if (granted > 0) C.ok else C.textSecondary)
-                    } else {
-                        tv.text = "Health: not available on this device"
-                        tv.setTextColor(C.textSecondary)
+                // NEVER block main: getGrantedPermissions is a binder round-trip.
+                // On-tick we show only SDK availability + the last known grant
+                // count (refreshed opportunistically off-main below). This
+                // fixed an ANR (runBlocking on main in the 2s tick, Sep 28).
+                val sdk = androidx.health.connect.client.HealthConnectClient
+                    .getSdkStatus(this) == androidx.health.connect.client.HealthConnectClient.SDK_AVAILABLE
+                if (!sdk) {
+                    tv.text = "Health: not available on this device"
+                    tv.setTextColor(C.textSecondary)
+                } else {
+                    tv.text = "Health: $healthGrantCount read grants active"
+                    tv.setTextColor(if (healthGrantCount > 0) C.ok else C.textSecondary)
+                    if (System.currentTimeMillis() - healthGrantCheckedAt > 30000) {
+                        healthGrantCheckedAt = System.currentTimeMillis()
+                        Thread {
+                            val n = runCatching {
+                                HealthReader.status(this).optJSONArray("granted")?.length() ?: 0
+                            }.getOrDefault(0)
+                            healthGrantCount = n
+                        }.start()
                     }
                 }
             }

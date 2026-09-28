@@ -78,7 +78,6 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
-<<<<<<< HEAD
     // Angus Software design-system tokens (EnvPalette bridge). The token
     // vals are typed androidx.compose.ui.graphics.Color, so compose-ui is
     // needed on the COMPILE classpath (the AAR only scopes it runtime).
@@ -92,6 +91,9 @@ dependencies {
     // on-device the framework provides it.
     testImplementation("org.json:json:20240303")
 
+    // ComponentActivity + activity-result API for the Health Connect
+    // permission request contract (HCRequestActivity).
+    implementation("androidx.activity:activity-ktx:1.10.1")
     // Telemetry (docs/telemetry-spec.md): HC client for the phone path (A14+
     // framework module, no provider install needed); Health Services for the
     // watch path (WearOS has no Health Connect — Samsung FAQ). Both are

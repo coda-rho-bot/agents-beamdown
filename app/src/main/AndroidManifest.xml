@@ -84,6 +84,11 @@
              health UI resolves this alias to walk the user through per-type
              grants. targetActivity is our launcher; the alias is permission-
              gated so only the Health Connect module can start it. -->
+        <activity
+            android:name=".HCRequestActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <activity-alias
             android:name="UAndAboveOnboardingActivity"
             android:exported="true"

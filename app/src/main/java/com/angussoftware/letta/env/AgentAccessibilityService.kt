@@ -305,6 +305,16 @@ class AgentAccessibilityService : AccessibilityService() {
                 else -> err().put("error", "usage: health status|hr|steps|sleep")
             }
             "location" -> LocationReader.read(applicationContext)
+            "hcrequest" -> {
+                // Start the HC permission request from the app process (the
+                // a11y service IS the app uid — only in-process starts of the
+                // non-exported activity pass the uid check; shell/am cannot).
+                runCatching {
+                    startActivity(android.content.Intent(this, HCRequestActivity::class.java)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    ok().put("launched", true)
+                }.fold({ it }, { err().put("error", "launch failed: ${it.message}") })
+            }
             "notifstatus" -> ok()
                 .put("granted", AgentNotificationListener.granted(applicationContext))
                 .put("snapshotCount", AgentNotificationListener.current().optInt("count", 0))

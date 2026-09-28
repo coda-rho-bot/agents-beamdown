@@ -35,7 +35,7 @@ object HealthReader {
 
     private const val CACHE = "health.json"
 
-    private val READ_PERMISSIONS = setOf(
+    val READ_PERMISSIONS = setOf(
         HealthPermission.getReadPermission(HeartRateRecord::class),
         HealthPermission.getReadPermission(StepsRecord::class),
         HealthPermission.getReadPermission(SleepSessionRecord::class),
