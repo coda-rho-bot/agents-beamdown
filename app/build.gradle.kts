@@ -78,6 +78,7 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+<<<<<<< HEAD
     // Angus Software design-system tokens (EnvPalette bridge). The token
     // vals are typed androidx.compose.ui.graphics.Color, so compose-ui is
     // needed on the COMPILE classpath (the AAR only scopes it runtime).
@@ -90,4 +91,17 @@ dependencies {
     // method throws "not mocked") — the real implementation is test-only;
     // on-device the framework provides it.
     testImplementation("org.json:json:20240303")
+
+    // Telemetry (docs/telemetry-spec.md): HC client for the phone path (A14+
+    // framework module, no provider install needed); Health Services for the
+    // watch path (WearOS has no Health Connect — Samsung FAQ). Both are
+    // read-only usage. minSdk 26 is the HC SDK floor; health-services runs
+    // only on WearOS (no-op classes elsewhere).
+    // Health Services (watch path) minSdk 30 — the app keeps minSdk 26 for the
+    // legacy-storage path; the watch-fallback classes are only exercised on
+    // WearOS (API 30+), so overrideLibrary is safe on phones below 30 (never
+    // loads) and correct on the watch. Phone path (Health Connect, minSdk 26)
+    // is unaffected.
+    implementation("androidx.health.connect:connect-client:1.1.0")
+    implementation("androidx.health:health-services-client:1.1.0")
 }

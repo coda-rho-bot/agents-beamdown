@@ -70,6 +70,10 @@ class MainActivity : android.app.Activity() {
     private lateinit var envLine: TextView
     private var a11yDotView: TextView? = null
     private var a11yTextView: TextView? = null
+    // Telemetry card rows (2s tick live-updates grant states).
+    private var healthTextView: TextView? = null
+    private var locationTextView: TextView? = null
+    private var notifTextView: TextView? = null
     // Nullable: the watch layout has no battery banner (WearOS has no
     // exemption path — ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is
     // ignored) and no collapsible log (log tail is always visible).
@@ -746,7 +750,87 @@ class MainActivity : android.app.Activity() {
         a11yCard.addView(a11yHeader)
         root.addView(a11yCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
-        root.addView(actionCard)
+
+        // ---- telemetry card (health/location/notifications grant states) ----
+        // One card, three rows, each showing live grant state + the exact next
+        // action (spec §4: one place, never silent). Re-evaluated on the 2s tick.
+        val teleCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+        }
+        teleCard.addView(TextView(this).apply {
+            text = "T E L E M E T R Y"
+            textSize = 12f
+            setTextColor(C.textSecondary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(6))
+        })
+        // Health row: HC SDK availability + granted count.
+        healthTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        val healthBtn = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                // Health Connect grants flow through the PermissionController
+                // contract; on A14+ the framework onboarding intent also works.
+                // Launch the HC settings action — simplest reliable path.
+                runCatching {
+                    startActivity(android.content.Intent("android.health.connect.action.HEALTH_HOME_SETTINGS"))
+                }.onFailure {
+                    runCatching {
+                        startActivity(android.content.Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS")
+                            .putExtra("android.intent.extra.PACKAGE_NAME", packageName))
+                    }
+                }
+            }
+        }
+        val healthRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        healthRow.addView(healthTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        healthRow.addView(healthBtn)
+        teleCard.addView(healthRow)
+        // Location row.
+        locationTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        val locationBtn = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                requestPermissions(arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION), 2)
+            }
+        }
+        val locationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        locationRow.addView(locationTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        locationRow.addView(locationBtn)
+        teleCard.addView(locationRow)
+        // Notifications row: special-access toggle, poll the Secure setting.
+        notifTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        val notifBtn = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                runCatching {
+                    startActivity(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS.let {
+                        android.content.Intent(it)
+                    })
+                }
+            }
+        }
+        val notifRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        notifRow.addView(notifTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        notifRow.addView(notifBtn)
+        teleCard.addView(notifRow)
+        root.addView(teleCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- self-updater: update card (IDLE only — queued while running) ----
@@ -1210,6 +1294,31 @@ class MainActivity : android.app.Activity() {
                 text = if (a11yOn) "Phone control: ON — agent can operate apps"
                        else "Phone control: OFF"
                 setTextColor(if (a11yOn) C.ok else C.textPrimary)
+            }
+            // Telemetry rows: live grant states (HC status is cheap; cache per tick)
+            healthTextView?.let { tv ->
+                runCatching {
+                    val st = HealthReader.status(this)
+                    if (st.optBoolean("sdkAvailable")) {
+                        val granted = st.optJSONArray("granted")?.length() ?: 0
+                        tv.text = "Health: $granted read grants active"
+                        tv.setTextColor(if (granted > 0) C.ok else C.textSecondary)
+                    } else {
+                        tv.text = "Health: not available on this device"
+                        tv.setTextColor(C.textSecondary)
+                    }
+                }
+            }
+            locationTextView?.let { tv ->
+                val on = LocationReader.granted(this)
+                tv.text = if (on) "Location: granted" else "Location: not granted"
+                tv.setTextColor(if (on) C.ok else C.textSecondary)
+            }
+            notifTextView?.let { tv ->
+                val on = AgentNotificationListener.granted(this)
+                tv.text = if (on) "Notifications: listener active"
+                          else "Notifications: listener off"
+                tv.setTextColor(if (on) C.ok else C.textSecondary)
             }
             // Watch Ally-control pill: live label (ON → opens settings; OFF → guide)
             watchA11yPill?.apply { text = if (a11yOn) "Ally control · ON" else "Ally control · OFF" }
