@@ -628,6 +628,21 @@ class LettaEnvironmentService : Service() {
             "export LD_LIBRARY_PATH=$combinedPath\n" +
             "export NODE_OPTIONS=\"--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
             "export UV_USE_IO_URING=0\n" +
+            // DNS forwarder for the glibc git ELF chain (Sep 28): dnsport.so
+            // (LD_PRELOAD getaddrinfo override inside git-elf) sends raw DNS
+            // to 127.0.0.1:15353; this node forwarder relays to public
+            // resolvers. Must launch via the APK loader path (uv__close assert
+            // otherwise) with setsid (dies with the adb shell otherwise).
+            // Port check makes it idempotent across restarts. NODE_OPTIONS is
+            // unset for the forwarder: fs-shim/dns-shim are for the letta
+            // server process, and dns-shim (c-ares setServers) breaks the
+            // forwarder's own dgram binds (empirically — it dies at launch
+            // with the shims preloaded).
+            "OLDNO=\$NODE_OPTIONS; unset NODE_OPTIONS\n" +
+            "if ! netstat -an 2>/dev/null | grep -q 127.0.0.1:15353; then\n" +
+            "  setsid nohup ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} ${File(filesDir, "dns-forwarder.js").absolutePath} > ${File(filesDir, "dns-forwarder.log").absolutePath} 2>&1 < /dev/null &\n" +
+            "fi\n" +
+            "export NODE_OPTIONS=\$OLDNO\n" +
             "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name '${envName()}' --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
         )
         val stdinFile = File(filesDir, "stdin.txt")
@@ -977,17 +992,49 @@ class LettaEnvironmentService : Service() {
 
         // git: letta-code 0.32.x requires a spawnable `git` on PATH for
         // git-based MemFS sync. The rootfs never shipped git, so every turn
-        // died with "spawn git ENOENT". The wrapper runs Debian git INSIDE
-        // the proot rootfs (payload install on first run, cwd mapped to
-        // /host, GIT_* env forwarded). Source of truth:
-        // app/src/main/assets/git.sh — keep in sync with the asset. Always
-        // rewrite, same policy as dx above.
+        // died with "spawn git ENOENT". PRIMARY: static ELF chain (git-elf +
+        // gc-shim + dnsport.so) — proot cannot exec from loader-chain
+        // processes (interpreter ENOENT), so the old proot wrapper failed
+        // for every memfs clone. FALLBACK: proot rootfs for contexts that
+        // can run it. Source of truth: app/src/main/assets/git.sh — keep in
+        // sync with the asset. Always rewrite, same policy as dx above.
         val git = File(binDir, "git")
         assets.open("git.sh").use { input ->
             git.outputStream().use { output -> input.copyTo(output) }
         }
         git.setExecutable(true, false)
         log("git wrapper installed")
+
+        // git-elf + gc-shim + dnsport.so: static ELF git chain (Sep 28).
+        // git-elf exec's the rootfs glibc loader with real git and
+        // --preload dnsport.so (getaddrinfo override → local DNS forwarder).
+        // gc-shim holds static ELF shims for git's dashed-dispatch child
+        // spawns (git, git-remote-{http,https,ftp,ftps}) — raw glibc
+        // git-core binaries ENOEXEC on Android (no interpreter). Sources:
+        // tools/watch-git-shims/. Always rewrite (assets are immutable).
+        val gitElf = File(binDir, "git-elf")
+        assets.open("git-elf").use { input ->
+            gitElf.outputStream().use { output -> input.copyTo(output) }
+        }
+        gitElf.setExecutable(true, false)
+        val gcShimDir = File(filesDir, "gc-shim")
+        gcShimDir.mkdirs()
+        for (name in listOf("git", "git-remote-ftp", "git-remote-ftps", "git-remote-http", "git-remote-https")) {
+            val shim = File(gcShimDir, name)
+            assets.open("gc-shim/$name").use { input ->
+                shim.outputStream().use { output -> input.copyTo(output) }
+            }
+            shim.setExecutable(true, false)
+        }
+        val dnsport = File(File(filesDir, "libs"), "dnsport.so")
+        assets.open("dnsport.so").use { input ->
+            dnsport.outputStream().use { output -> input.copyTo(output) }
+        }
+        val dnsForwarder = File(filesDir, "dns-forwarder.js")
+        assets.open("dns-forwarder.js").use { input ->
+            dnsForwarder.outputStream().use { output -> input.copyTo(output) }
+        }
+        log("git ELF chain installed (git-elf, gc-shim, dnsport.so, dns-forwarder.js)")
 
         // agentctl: agent-side client for the accessibility command channel
         // (tap/swipe/text/screen-tree) + am/pm/notify passthroughs. Always

@@ -57,7 +57,7 @@ android {
     // bloats the APK and slows the one-shot staging copy. Same treatment
     // rootfs.tar relies on (uncompressed .tar).
     androidResources {
-        noCompress += listOf("tar", "gz")
+        noCompress += listOf("tar", "gz", "git-elf", "so")
     }
 
     lint {
