@@ -67,54 +67,147 @@ object HealthReader {
      *  does not depend on Samsung Health sync at all. */
     fun heartRate(ctx: Context): JSONObject {
         connect(ctx) ?: return wearHeartRate(ctx)
-        wearFallback = false
         return hcHeartRate(ctx)
     }
 
-    private var wearFallback = false
+    // ---- WearOS live HR (adversarial-review rewrite, Sep 29) ------------------
+    // Root cause found by dual review + emulator control: Health Services gates
+    // HEART_RATE_BPM on BODY_SENSORS for apps targeting <=35 (AOSP gate, NOT
+    // Samsung) — health.READ_HEART_RATE is the 36+ name and our pm-grant of it
+    // granted a name the sensor gate never checks. Manifest declares BOTH (no
+    // maxSdkVersion — Google's migration snippet with maxSdkVersion="35" is
+    // STRIPPED on API-36 devices = silent no-op). Beyond permissions: register
+    // failures are invisible (default no-op callbacks), availability is the
+    // only diagnostic channel, concurrent calls race (new callback replaces
+    // the previous server-side registration for the same package+dataType),
+    // single-arg register pins delivery to main, and the sensor MUST be
+    // unregistered or the PPG stays lit (battery).
+
+    private val measureMutex = java.util.concurrent.Semaphore(1)
+    private val cbExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "hr-measure").apply { isDaemon = true }
+    }
 
     private fun wearHeartRate(ctx: Context): JSONObject {
-        wearFallback = true
-        return try {
+        if (!measureMutex.tryAcquire()) {
+            return JSONObject().put("ok", false)
+                .put("error", "an HR measurement is already in progress — retry in a moment")
+        }
+        try {
+            // (1) Permission preflight — the actual runtime grant, not the manifest
+            val pm = ctx.packageManager
+            val granted = listOf(
+                "android.permission.BODY_SENSORS",
+                "android.permission.health.READ_HEART_RATE"
+            ).count {
+                runCatching {
+                    pm.checkPermission(it, ctx.packageName) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                }.getOrDefault(false)
+            }
+            if (granted == 0) return JSONObject().put("ok", false)
+                .put("error", "HR permission not granted on this watch — grant via " +
+                    "pm grant com.angussoftware.letta.env android.permission.BODY_SENSORS " +
+                    "(or the Telemetry > Health Grant button), then retry")
+
             val measure = androidx.health.services.client.HealthServices
                 .getClient(ctx).measureClient
+
+            // (2) Capability preflight — unsupported types register "successfully"
+            // and never deliver; Samsung capability sets vary with state.
+            val caps = runCatching {
+                measure.getCapabilitiesAsync().get(5, java.util.concurrent.TimeUnit.SECONDS)
+            }.getOrNull()
+            if (caps != null && androidx.health.services.client.data.DataType.HEART_RATE_BPM
+                    !in caps.supportedDataTypesMeasure) {
+                return JSONObject().put("ok", false)
+                    .put("error", "Measure(HEART_RATE_BPM) unsupported by this device's Health Services " +
+                        "(supported: ${caps.supportedDataTypesMeasure.map { it.toString() }})")
+            }
+
             val latch = java.util.concurrent.CountDownLatch(1)
             var sampleJson: JSONObject? = null
+            var lastAvail: String? = null
+            var regFailure: Throwable? = null
+
             val cb = object : androidx.health.services.client.MeasureCallback {
+                override fun onRegistered() { /* explicit override: not a silent no-op */ }
+                override fun onRegistrationFailed(t: Throwable) {
+                    regFailure = t
+                    latch.countDown()
+                }
                 override fun onAvailabilityChanged(
                     t: androidx.health.services.client.data.DeltaDataType<*, *>,
                     a: androidx.health.services.client.data.Availability
-                ) { /* wait for data */ }
-                override fun onDataReceived(d: androidx.health.services.client.data.DataPointContainer) {
-                    val dp = d.getData(
-                        androidx.health.services.client.data.DataType.HEART_RATE_BPM).firstOrNull()
-                    if (dp != null) {
-                        sampleJson = JSONObject()
-                            .put("ok", true)
-                            .put("bpm", dp.value.toInt())
-                            .put("sampledAt", System.currentTimeMillis())
-                            .put("ageSec", 0)
-                            .put("source", "wear-measure-live")
+                ) {
+                    lastAvail = a.toString()
+                    // Fail fast on terminal states; keep waiting through ACQUIRING.
+                    if (a.toString() in setOf("DISABLED", "UNAVAILABLE", "DISENGAGED"))
                         latch.countDown()
+                }
+                override fun onDataReceived(d: androidx.health.services.client.data.DataPointContainer) {
+                    runCatching {
+                        val dp = d.getData(
+                            androidx.health.services.client.data.DataType.HEART_RATE_BPM).lastOrNull()
+                        if (dp != null) {
+                            sampleJson = JSONObject()
+                                .put("ok", true)
+                                .put("bpm", Math.round(dp.value))
+                                .put("sampledAt", System.currentTimeMillis())
+                                .put("ageSec", 0)
+                                .put("source", "wear-measure-live")
+                            latch.countDown()
+                        }
                     }
                 }
             }
+
+            // (3) Executor overload — never main; a11y commands queue there.
             measure.registerMeasureCallback(
-                androidx.health.services.client.data.DataType.HEART_RATE_BPM, cb)
-            if (!latch.await(15, java.util.concurrent.TimeUnit.SECONDS)) {
-                // Best-effort unregister (ListenableFuture via reflection-free
-                // listener — avoids guava dep): the callback object going
-                // unreferenced stops delivery; sensor registration is dropped
-                // by the service when the client process disconnects.
-                return JSONObject().put("ok", false)
-                    .put("error", "no HR sample within 15s — is the watch worn and the sensor touching skin?")
+                androidx.health.services.client.data.DataType.HEART_RATE_BPM, cbExecutor, cb)
+            try {
+                // (4) 25s budget: PPG cold-start warm-up commonly 5-15s, worst
+                // case longer; report the availability state on timeout.
+                val got = latch.await(25, java.util.concurrent.TimeUnit.SECONDS)
+                val result = when {
+                    regFailure != null -> JSONObject().put("ok", false)
+                        .put("error", "registration failed: ${regFailure!!.javaClass.simpleName}: ${regFailure!!.message}")
+                    sampleJson != null -> sampleJson!!
+                    lastAvail == "DISABLED" || lastAvail == "UNAVAILABLE" -> JSONObject().put("ok", false)
+                        .put("error", "HR sensor unavailable (availability=$lastAvail) — check watch settings/grants")
+                    lastAvail == "DISENGAGED" -> JSONObject().put("ok", false)
+                        .put("error", "watch not detecting skin (DISENGAGED) — adjust the strap")
+                    !got -> JSONObject().put("ok", false)
+                        .put("error", "no HR sample in 25s (last availability=$lastAvail — " +
+                            "likely ACQUIRING/cold sensor; wear the watch and retry)")
+                    else -> JSONObject().put("ok", false).put("error", "unexpected state: avail=$lastAvail")
+                }
+                if (result.optBoolean("ok")) cache(ctx, result)
+                logHealth(ctx, result)
+                return result
+            } finally {
+                // (5) ALWAYS release — PPG sensor, remote registration, callback
+                // cache entry. Guava IS packaged (transitive dep; the old
+                // comment claiming otherwise was wrong — bytecode-verified).
+                runCatching {
+                    measure.unregisterMeasureCallbackAsync(
+                        androidx.health.services.client.data.DataType.HEART_RATE_BPM, cb).get()
+                }
             }
-            val result = sampleJson!!
-            cache(ctx, result)
-            result
         } catch (e: Exception) {
-            JSONObject().put("ok", false)
-                .put("error", "wear HR measure failed: ${e.message}")
+            val r = JSONObject().put("ok", false)
+                .put("error", "wear HR measure failed: ${e.javaClass.simpleName}: ${e.message}")
+            logHealth(ctx, r)
+            return r
+        } finally {
+            measureMutex.release()
+        }
+    }
+
+    private fun logHealth(ctx: Context, result: JSONObject) {
+        runCatching {
+            java.io.File(ctx.filesDir, "a11y.log").appendText(
+                "[${System.currentTimeMillis()}] health-hr: ${result.toString().take(300)}\n")
         }
     }
 

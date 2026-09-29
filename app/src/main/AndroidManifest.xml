@@ -37,6 +37,11 @@
          targetSdk 28. NotificationListener needs no permission element — its
          grant is the user special-access toggle. -->
     <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <!-- Legacy path: WearOS Health Services gates MeasureClient on BODY_SENSORS
+         for apps targeting <=35 (compat shim routes the new health.* names only
+         on W6+ when the app ALSO declares this). Registration silently succeeds
+         without it but no samples are delivered — observed Sep 28. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
     <uses-permission android:name="android.permission.health.READ_STEPS" />
     <uses-permission android:name="android.permission.health.READ_SLEEP" />
     <uses-permission android:name="android.permission.health.READ_SKIN_TEMPERATURE" />

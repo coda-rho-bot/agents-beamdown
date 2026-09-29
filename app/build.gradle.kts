@@ -106,4 +106,7 @@ dependencies {
     // is unaffected.
     implementation("androidx.health.connect:connect-client:1.1.0")
     implementation("androidx.health:health-services-client:1.1.0")
+    // compile-scope stub for ListenableFuture signatures in health-services
+    // (the AAR pulls guava at RUNTIME only; compile needs the interface).
+    implementation("com.google.guava:guava:32.0.1-android")
 }
