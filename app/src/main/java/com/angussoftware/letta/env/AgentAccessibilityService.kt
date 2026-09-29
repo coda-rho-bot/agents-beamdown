@@ -196,35 +196,38 @@ class AgentAccessibilityService : AccessibilityService() {
     ) {
         dismissConsentOverlay()
         val dp = { v: Int -> (v * resources.displayMetrics.density).toInt() }
+        // Angus Software Theming tokens (dark set — the overlay scrim is always
+        // dark, so the ui mode doesn't apply here).
+        val p = EnvPalette.forMode(night = true)
         val root = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
-            setBackgroundColor(0xF0101014.toInt())
+            setBackgroundColor(p.bg.withAlpha(0xF0))
             setPadding(dp(28), dp(40), dp(28), dp(40))
             gravity = android.view.Gravity.CENTER
         }
         val title = android.widget.TextView(this).apply {
             text = "Agent requests phone access"
             textSize = 22f
-            setTextColor(0xFFE8E8E8.toInt())
+            setTextColor(p.textPrimary)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         val who = android.widget.TextView(this).apply {
             text = agent
             textSize = 16f
-            setTextColor(0xFF7EC8E3.toInt())
+            setTextColor(p.accent)
             setPadding(0, dp(10), 0, 0)
         }
         val body = android.widget.TextView(this).apply {
             text = "“$desc”"
             textSize = 18f
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(p.textPrimary)
             setPadding(0, dp(16), 0, dp(8))
         }
         val dur = android.widget.TextView(this).apply {
             text = "Duration: ${seconds}s — then access revokes automatically. " +
                 "Approving lets the agent see and use this phone for that purpose."
             textSize = 14f
-            setTextColor(0xFFAAAAAA.toInt())
+            setTextColor(p.textSecondary)
             setPadding(0, 0, 0, dp(24))
         }
         val buttons = android.widget.LinearLayout(this).apply {

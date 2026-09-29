@@ -42,28 +42,13 @@ class MainActivity : android.app.Activity() {
         private val ENV_REGEX = Regex("^[a-z0-9][a-z0-9-_]{0,63}$")
     }
 
-    // ---- palette: resolved per uiMode so both dark and light look right ----
-    private object C {
-        var bg = 0; var surface = 0; var textPrimary = 0; var textSecondary = 0
-        var ok = 0; var warn = 0; var error = 0; var accent = 0; var outline = 0
-    }
+    // ---- palette: Angus Software Theming tokens, resolved per uiMode ----
+    private lateinit var C: EnvPalette.Mode
 
     private fun resolvePalette() {
         val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-        if (night) {
-            C.bg = Color.parseColor("#0E1116"); C.surface = Color.parseColor("#1A2028")
-            C.textPrimary = Color.parseColor("#E6EAF0"); C.textSecondary = Color.parseColor("#8B93A1")
-            C.ok = Color.parseColor("#4ADE80"); C.warn = Color.parseColor("#FBBF24")
-            C.error = Color.parseColor("#F87171"); C.accent = Color.parseColor("#38BDF8")
-            C.outline = Color.parseColor("#2A323E")
-        } else {
-            C.bg = Color.parseColor("#F5F7FA"); C.surface = Color.WHITE
-            C.textPrimary = Color.parseColor("#111827"); C.textSecondary = Color.parseColor("#6B7280")
-            C.ok = Color.parseColor("#15803D"); C.warn = Color.parseColor("#B45309")
-            C.error = Color.parseColor("#B91C1C"); C.accent = Color.parseColor("#0369A1")
-            C.outline = Color.parseColor("#E2E6EC")
-        }
+        C = EnvPalette.forMode(night)
     }
 
     private fun dp(v: Int): Int = (resources.displayMetrics.density * v).toInt()
@@ -269,7 +254,8 @@ class MainActivity : android.app.Activity() {
         batteryBanner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply {
-                setColor(0x26F87171.toInt()) // translucent error tint; renderStatus recolors per mode
+                // translucent error tint; renderStatus recolors per mode
+                setColor(C.error.withAlpha(0x26))
                 cornerRadius = dp(12).toFloat()
             }
             minimumHeight = dp(48)
@@ -297,15 +283,11 @@ class MainActivity : android.app.Activity() {
         fun actionButton(label: String, danger: Boolean = false): Button = Button(this).apply {
             text = label
             textSize = 14f
-            val dark = isDark()
             backgroundTintList = android.content.res.ColorStateList.valueOf(
-                if (danger) (if (dark) 0x30F87171.toInt() else 0x14B91C1C.toInt())
-                else (if (dark) 0x2A38BDF8.toInt() else 0x140369A1.toInt())
+                if (danger) C.error.withAlpha(if (isDark()) 0x30 else 0x14)
+                else C.accent.withAlpha(if (isDark()) 0x2A else 0x14)
             )
-            setTextColor(
-                if (danger) (if (dark) 0xFFF0A0A0.toInt() else 0xFFB91C1C.toInt())
-                else (if (dark) 0xFF7DD3FC.toInt() else 0xFF0369A1.toInt())
-            )
+            setTextColor(if (danger) C.error else C.accent)
         }
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val startBtn = actionButton("Start").apply {
@@ -717,9 +699,9 @@ class MainActivity : android.app.Activity() {
             // Review #19 N3: solid error-tinted bg in light mode (white text
             // on 15%-alpha red was unreadable); translucent in dark.
             (batteryBanner.background as? GradientDrawable)?.setColor(
-                if (isDark()) 0x26F87171.toInt() else 0xFF991B1B.toInt())
+                if (isDark()) C.error.withAlpha(0x26) else C.error)
             batteryBannerText.setTextColor(
-                if (isDark()) 0xFFFECACA.toInt() else Color.WHITE)
+                if (isDark()) C.textPrimary else Color.WHITE)
 
             if (logExpanded) {
                 val tail = if (logFile.exists()) {

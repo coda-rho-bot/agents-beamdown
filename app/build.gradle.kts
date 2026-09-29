@@ -5,7 +5,10 @@ plugins {
 
 android {
     namespace = "com.angussoftware.letta.env"
-    compileSdk = 35
+    // compileSdk 36: theming-compose 0.14.1 transitives (activity-compose
+    // 1.13.0 → core 1.18.0) require it. Compile-time API surface only —
+    // targetSdk stays 28 (legacy external storage is intentional).
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.angussoftware.letta.env"
@@ -53,4 +56,12 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+    // Angus Software design-system tokens (EnvPalette bridge). The token
+    // vals are typed androidx.compose.ui.graphics.Color, so compose-ui is
+    // needed on the COMPILE classpath (the AAR only scopes it runtime).
+    // The rest of Compose stays an unused runtime transitive.
+    implementation("com.angussoftware.theming:theming-compose:0.14.1")
+    implementation("org.jetbrains.compose.ui:ui:1.11.1")
+
+    testImplementation("junit:junit:4.13.2")
 }
