@@ -1360,12 +1360,27 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         b.text = if (healthGrantCount > 0) "✓" else "Grant"
                         b.isEnabled = true // always tappable: shows state dialog when granted
                     }
-                    if (System.currentTimeMillis() - healthGrantCheckedAt > 30000) {
+                    if (System.currentTimeMillis() - healthGrantCheckedAt > 5000) {
                         healthGrantCheckedAt = System.currentTimeMillis()
                         Thread {
-                            val n = runCatching {
-                                HealthReader.status(this).optJSONArray("granted")?.length() ?: 0
-                            }.getOrDefault(0)
+                            // Truth source: PackageManager grant state, NOT the
+                            // HC client — getOrCreate() caches permission
+                            // snapshots per instance, and a client created
+                            // before pm-grant returns stale empty grants
+                            // forever (UI showed 0 while the socket path, fresh
+                            // client, saw 3 — Sep 28). pm state is the actual
+                            // authority anyway.
+                            val pm = packageManager
+                            val n = listOf(
+                                "android.permission.health.READ_HEART_RATE",
+                                "android.permission.health.READ_STEPS",
+                                "android.permission.health.READ_SLEEP"
+                            ).count {
+                                runCatching {
+                                    pm.checkPermission(it, packageName) ==
+                                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                                }.getOrDefault(false)
+                            }
                             healthGrantCount = n
                         }.start()
                     }
