@@ -93,6 +93,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var a11yDotView: TextView? = null
     private var a11yTextView: TextView? = null
     // Telemetry card rows (2s tick live-updates grant states).
+    private var healthBtnView: Button? = null
     private var healthGrantCount = 0
     private var healthGrantCheckedAt = 0L
     private var healthTextView: TextView? = null
@@ -795,23 +796,41 @@ class MainActivity : androidx.activity.ComponentActivity() {
             textSize = 13f
             setTextColor(C.textPrimary)
         }
-        val healthBtn = Button(this).apply {
+        healthBtnView = Button(this).apply {
             text = "Grant"
             textSize = 12f
             setOnClickListener {
-                hcRequest.launch(androidx.health.connect.client.permission.HealthPermission.getReadPermission(
-                    androidx.health.connect.client.records.HeartRateRecord::class).let { hr ->
-                    setOf(hr,
+                // targetSdk 28: the permission controller silently refuses the
+                // HC dialog (16ms auto-dismiss, traced Sep 28) — grants come
+                // via pm grant. The contract launch is kept ONLY because it
+                // registers the app with HC (required once); if grants are
+                // already in place this button shows state instead.
+                if (healthGrantCount > 0) {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Health access already granted")
+                        .setMessage("$healthGrantCount read permission(s) active. " +
+                            "Manage them in Settings > Apps > Health Connect > App permissions.")
+                        .setPositiveButton("Open HC settings") { _, _ ->
+                            runCatching {
+                                startActivity(android.content.Intent("android.health.connect.action.HEALTH_HOME_SETTINGS"))
+                            }
+                        }
+                        .setNegativeButton("Close", null)
+                        .show()
+                } else {
+                    hcRequest.launch(setOf(
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.HeartRateRecord::class),
                         androidx.health.connect.client.permission.HealthPermission.getReadPermission(
                             androidx.health.connect.client.records.StepsRecord::class),
                         androidx.health.connect.client.permission.HealthPermission.getReadPermission(
-                            androidx.health.connect.client.records.SleepSessionRecord::class))
-                })
+                            androidx.health.connect.client.records.SleepSessionRecord::class)))
+                }
             }
         }
         val healthRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         healthRow.addView(healthTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        healthRow.addView(healthBtn)
+        healthRow.addView(healthBtnView!!)
         teleCard.addView(healthRow)
         // Location row.
         locationTextView = TextView(this).apply {
@@ -1334,8 +1353,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     tv.text = "Health: not available on this device"
                     tv.setTextColor(C.textSecondary)
                 } else {
-                    tv.text = "Health: $healthGrantCount read grants active"
+                    tv.text = if (healthGrantCount > 0) "Health: granted — telemetry live"
+                              else "Health: $healthGrantCount read grants active"
                     tv.setTextColor(if (healthGrantCount > 0) C.ok else C.textSecondary)
+                    healthBtnView?.let { b ->
+                        b.text = if (healthGrantCount > 0) "✓" else "Grant"
+                        b.isEnabled = true // always tappable: shows state dialog when granted
+                    }
                     if (System.currentTimeMillis() - healthGrantCheckedAt > 30000) {
                         healthGrantCheckedAt = System.currentTimeMillis()
                         Thread {
