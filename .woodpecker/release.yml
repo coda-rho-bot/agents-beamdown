@@ -16,6 +16,12 @@
 # uploads go direct to http://forgejo:3000 (docker DNS), bypassing
 # Cloudflare. Downloads (smaller, GET) use the public URL.
 #
+# Secret handling: leak-proof (angus-tasks PR #80 pattern, post-#287).
+# ALL secrets are step-level from_secret env consumed ONLY via
+# os.environ inside Python heredocs — zero secret references in shell
+# command text (set +x/-x brackets do NOT suppress the generator
+# echo). FATAL guards on every required env.
+#
 # This app does NOT go on Google Play — no AAB, no Play upload step.
 clone:
   git:
@@ -47,25 +53,64 @@ steps:
         yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
         echo "sdk.dir=$ANDROID_HOME" > local.properties
       # Fetch the build rootfs (gitignored, 162MB) from the internal
-      # rootfs-source release. (bracketed: token in URL would xtrace-print)
+      # rootfs-source release. Leak-proof (PR #80 pattern, post-#287):
+      # FORGEJO_TOKEN consumed ONLY via os.environ inside Python; zero
+      # secret references in shell command text (set +x brackets do NOT
+      # suppress the generator echo). Custom User-Agent — Forgejo
+      # 403-blocks the default Python-urllib UA.
       - |
-        set +x
-        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
-          "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source" \
-          -o /tmp/rootfs-rel.json
-        ROOTFS_URL=$(python3 -c "import json;print(json.load(open('/tmp/rootfs-rel.json'))['assets'][0]['browser_download_url'])")
-        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
-          "$ROOTFS_URL" \
-          -o app/src/main/assets/rootfs.tar
-        set -x
+        cat > /tmp/fetch-rootfs.py << 'PYEOF'
+        import json, os, shutil, sys, urllib.request
+        TOKEN = os.environ.get('FORGEJO_TOKEN')
+        if not TOKEN:
+            print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
+            sys.exit(1)
+        HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
+        API = 'https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source'
+        try:
+            req = urllib.request.Request(API, headers=HDRS)
+            rel = json.load(urllib.request.urlopen(req, timeout=120))
+            asset = rel['assets'][0]
+            print('rootfs asset:', asset['name'])
+            req = urllib.request.Request(asset['browser_download_url'], headers=HDRS)
+            with urllib.request.urlopen(req, timeout=900) as r, \
+                 open('app/src/main/assets/rootfs.tar', 'wb') as f:
+                shutil.copyfileobj(r, f)
+        except Exception as e:
+            print(f'FATAL: rootfs fetch failed: {e}', file=sys.stderr)
+            sys.exit(1)
+        size = os.path.getsize('app/src/main/assets/rootfs.tar')
+        print(f'rootfs.tar downloaded: {size} bytes')
+        PYEOF
+        python3 /tmp/fetch-rootfs.py
         ls -la app/src/main/assets/rootfs.tar
-      # Decode the release keystore + extract the rootfs for inject-libs.sh
-      # (bracketed: B64 pipe, keystore writes, and keytool all expand secrets)
+      # Decode the release keystore + verify the alias. Leak-proof (PR #80
+      # pattern): keystore B64 and password consumed ONLY via os.environ
+      # inside Python; the keytool verification runs as a Python subprocess
+      # (password in child argv, never in shell command text — keytool
+      # has no @argfile support, tested empirically).
       - |
-        set +x
-        printf '%s' "${LETTAENV_KEYSTORE_B64}" | base64 -d > /tmp/letta-environment-release.jks
-        keytool -list -keystore /tmp/letta-environment-release.jks -storepass "${LETTAENV_KEYSTORE_PASSWORD}" -alias lettaenv || { echo "KEYSTORE VERIFY FAILED"; exit 1; }
-        set -x
+        cat > /tmp/keystore-setup.py << 'PYEOF'
+        import base64, os, subprocess, sys
+        REQUIRED = ['LETTAENV_KEYSTORE_B64', 'LETTAENV_KEYSTORE_PASSWORD']
+        missing = [k for k in REQUIRED if not os.environ.get(k)]
+        if missing:
+            print('FATAL: missing required env: ' + ', '.join(missing), file=sys.stderr)
+            sys.exit(1)
+        KS_PATH = '/tmp/letta-environment-release.jks'
+        with open(KS_PATH, 'wb') as f:
+            f.write(base64.b64decode(os.environ['LETTAENV_KEYSTORE_B64']))
+        os.chmod(KS_PATH, 0o600)
+        r = subprocess.run(['keytool', '-list', '-keystore', KS_PATH,
+                           '-storepass', os.environ['LETTAENV_KEYSTORE_PASSWORD'],
+                           '-alias', 'lettaenv'],
+                          capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            print('KEYSTORE VERIFY FAILED:\n' + r.stderr, file=sys.stderr)
+            sys.exit(1)
+        print('keystore decoded + alias lettaenv verified (values not logged)')
+        PYEOF
+        python3 /tmp/keystore-setup.py
         mkdir -p /tmp/lea-rootfs
         tar -xf app/src/main/assets/rootfs.tar -C /tmp/lea-rootfs
       # Build the APK
@@ -73,12 +118,27 @@ steps:
       - ./gradlew --no-daemon :app:assembleRelease
       # Post-build surgery + release signing. inject-libs.sh v5 injects the
       # loader binaries into lib/arm64-v8a, zipaligns, and signs — pointed
-      # at the release keystore via KS/KS_PASS env instead of debug.
+      # at the release keystore. Leak-proof (PR #80 pattern): KS_PASS is
+      # exported by a Python helper from os.environ into a sourced 0600
+      # env file — the password never appears in shell command text.
       - |
+        cat > /tmp/ks-pass-setup.py << 'PYEOF'
+        import os, sys
+        pw = os.environ.get('LETTAENV_KEYSTORE_PASSWORD')
+        if not pw:
+            print('FATAL: missing required env: LETTAENV_KEYSTORE_PASSWORD', file=sys.stderr)
+            sys.exit(1)
+        with open('/tmp/inject-env', 'w') as f:
+            f.write('export KS_PASS=%s\n' % pw)
+        os.chmod('/tmp/inject-env', 0o600)
+        print('inject-libs signing env ready (value not logged)')
+        PYEOF
+        python3 /tmp/ks-pass-setup.py
+        . /tmp/inject-env
+        rm -f /tmp/inject-env
         ROOTFS=/tmp/lea-rootfs \
         KS=/tmp/letta-environment-release.jks \
         KS_ALIAS=lettaenv \
-        KS_PASS="${LETTAENV_KEYSTORE_PASSWORD}" \
         BT=$ANDROID_HOME/build-tools/36.0.0 \
         ./tools/inject-libs.sh app/build/outputs/apk/release/app-release-unsigned.apk
       # Verify the release signature (not debug)
@@ -89,32 +149,101 @@ steps:
       # Create the Forgejo release + attach the APK.
       # Upload goes DIRECT to the forgejo container (docker network) — the
       # ~436MB APK exceeds the Cloudflare 100MB body limit on the public URL.
-      # (bracketed: token in URL + curl data would xtrace-print)
+      # Leak-proof (PR #80 pattern, post-#287): FORGEJO_TOKEN consumed ONLY
+      # via os.environ inside the Python uploader; zero secret references in
+      # shell command text. Direct-route-first with public-URL fallback kept.
       - |
-        set +x
-        FORGE_API="https://git.angussoftware.dev/api/v1"
-        FORGE_DIRECT="http://forgejo:3000/api/v1"
-        REPO="repos/coda/letta-environment-android"
-        APK="letta-environment-${CI_COMMIT_TAG##*/}.apk"
+        cat > /tmp/publish-release.py << 'PYEOF'
+        import json, os, sys, urllib.request
+        TOKEN = os.environ.get('FORGEJO_TOKEN')
+        if not TOKEN:
+            print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
+            sys.exit(1)
+        TAG = os.environ['CI_COMMIT_TAG']
+        APK = 'letta-environment-' + TAG.split('/')[-1] + '.apk'  # mirrors ${CI_COMMIT_TAG##*/}
+        HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
+        REPO = 'repos/coda/letta-environment-android'
+        ROUTES = ['http://forgejo:3000/api/v1', 'https://git.angussoftware.dev/api/v1']
+        def fatal(msg):
+            print('FATAL: ' + msg, file=sys.stderr)
+            sys.exit(1)
         # release notes: first lines of the tag annotation (fallback: tag name)
-        NOTES=$(git tag -l --format='%(contents)' "${CI_COMMIT_TAG}" | head -20 || echo "Release ${CI_COMMIT_TAG}")
-        ESCAPED_NOTES=$(printf '%s' "$NOTES" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-        # create release (direct route; falls back to public URL on failure)
-        create_release() {
-          curl -sf -X POST -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${CI_COMMIT_TAG}\",\"name\":\"${CI_COMMIT_TAG}\",\"body\":${ESCAPED_NOTES}}" \
-            "$1/$REPO/releases" -o /tmp/rel.json && return 0
-          return 1
-        }
-        create_release "$FORGE_DIRECT" || create_release "$FORGE_API" || { echo "FATAL: release creation failed"; exit 1; }
-        REL_ID=$(python3 -c "import json;print(json.load(open('/tmp/rel.json'))['id'])")
-        # attach APK (direct route; public URL would break at Cloudflare's 100MB)
-        curl -sf -X POST \
-          -H "Authorization: token ${FORGEJO_TOKEN}" \
-          -F "attachment=@${APK}" \
-          "$FORGE_DIRECT/$REPO/releases/$REL_ID/assets" || { echo "FATAL: APK upload failed"; exit 1; }
-        set -x
-        echo "=== Release ${CI_COMMIT_TAG} published with ${APK} ==="
+        import subprocess
+        try:
+            notes = subprocess.run(['git', 'tag', '-l', '--format=%(contents)', TAG],
+                                   capture_output=True, text=True, timeout=30).stdout[:2000]
+        except Exception:
+            notes = ''
+        if not notes.strip():
+            notes = 'Release ' + TAG
+        # create release (direct route first; falls back to public URL)
+        rel_id = None
+        for base in ROUTES:
+            try:
+                req = urllib.request.Request(
+                    f'{base}/{REPO}/releases',
+                    data=json.dumps({'tag_name': TAG, 'name': TAG, 'body': notes}).encode(),
+                    headers={**HDRS, 'Content-Type': 'application/json'}, method='POST')
+                resp = urllib.request.urlopen(req, timeout=120)
+                rel = json.load(resp)
+                rel_id = rel['id']
+                print(f'release {TAG} created (id={rel_id}, route={base})')
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 409:
+                    print(f'release {TAG} already exists — fetching id')
+                    req = urllib.request.Request(f'{base}/{REPO}/releases/tags/{TAG}', headers=HDRS)
+                    rel_id = json.load(urllib.request.urlopen(req, timeout=120))['id']
+                    break
+                print(f'route {base} failed: {e.code} {e.reason}')
+            except Exception as e:
+                print(f'route {base} failed: {e}')
+        if rel_id is None:
+            fatal('release creation failed on all routes')
+        # attach APK (direct route; public URL would break at Cloudflare's
+        # 100MB body limit for the ~436MB APK). Streamed via http.client —
+        # the APK never sits in memory whole.
+        import http.client
+        from urllib.parse import urlsplit
+        size = os.path.getsize(APK)
+        print(f'uploading {APK} ({size} bytes)...')
+        boundary = '----angusci' + os.urandom(8).hex()
+        head = (f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="attachment"; filename="{APK}"\r\n'
+                f'Content-Type: application/vnd.android.package-archive\r\n\r\n').encode()
+        tail = f'\r\n--{boundary}--\r\n'.encode()
+        def upload(base):
+            u = urlsplit(base)
+            cls = http.client.HTTPSConnection if u.scheme == 'https' else http.client.HTTPConnection
+            conn = cls(u.hostname, u.port or (443 if u.scheme == 'https' else 80), timeout=1800)
+            path = f'{u.path}/{REPO}/releases/{rel_id}/assets'
+            conn.putrequest('POST', path)
+            conn.putheader('User-Agent', HDRS['User-Agent'])
+            conn.putheader('Authorization', HDRS['Authorization'])
+            conn.putheader('Content-Type', 'multipart/form-data; boundary=' + boundary)
+            conn.putheader('Content-Length', str(len(head) + size + len(tail)))
+            conn.endheaders()
+            conn.send(head)
+            with open(APK, 'rb') as f:
+                while chunk := f.read(1024 * 1024):
+                    conn.send(chunk)
+            conn.send(tail)
+            resp = conn.getresponse()
+            body = resp.read().decode(errors='replace')
+            if resp.status not in (200, 201):
+                raise RuntimeError(f'{resp.status}: {body[:300]}')
+            print(f'APK uploaded (route={base}, status={resp.status})')
+        for base in ROUTES:
+            try:
+                upload(base)
+                break
+            except Exception as e:
+                print(f'upload route {base} failed: {e}')
+        else:
+            fatal('APK upload failed on all routes')
+        print(f'=== Release {TAG} published with {APK} ===')
+        PYEOF
+        python3 /tmp/publish-release.py
     environment:
       GRADLE_USER_HOME: /root/.gradle
       ANDROID_HOME: /opt/android-sdk

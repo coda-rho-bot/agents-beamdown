@@ -37,17 +37,36 @@ steps:
         echo "sdk.dir=$ANDROID_HOME" > local.properties
       # rootfs.tar is gitignored (162MB) — asset merge needs it present.
       # Fetch the current build rootfs from the internal rootfs-source
-      # release attachment. (bracketed: token in URL would xtrace-print)
+      # release attachment. Leak-proof (PR #80 pattern, post-#287):
+      # FORGEJO_TOKEN consumed ONLY via os.environ inside Python; zero
+      # secret references in shell command text (set +x brackets do NOT
+      # suppress the generator echo). Custom User-Agent — Forgejo
+      # 403-blocks the default Python-urllib UA.
       - |
-        set +x
-        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
-          "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source" \
-          -o /tmp/rootfs-rel.json
-        ROOTFS_URL=$(python3 -c "import json;print(json.load(open('/tmp/rootfs-rel.json'))['assets'][0]['browser_download_url'])")
-        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
-          "$ROOTFS_URL" \
-          -o app/src/main/assets/rootfs.tar
-        set -x
+        cat > /tmp/fetch-rootfs.py << 'PYEOF'
+        import json, os, shutil, sys, urllib.request
+        TOKEN = os.environ.get('FORGEJO_TOKEN')
+        if not TOKEN:
+            print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
+            sys.exit(1)
+        HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
+        API = 'https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source'
+        try:
+            req = urllib.request.Request(API, headers=HDRS)
+            rel = json.load(urllib.request.urlopen(req, timeout=120))
+            asset = rel['assets'][0]
+            print('rootfs asset:', asset['name'])
+            req = urllib.request.Request(asset['browser_download_url'], headers=HDRS)
+            with urllib.request.urlopen(req, timeout=900) as r, \
+                 open('app/src/main/assets/rootfs.tar', 'wb') as f:
+                shutil.copyfileobj(r, f)
+        except Exception as e:
+            print(f'FATAL: rootfs fetch failed: {e}', file=sys.stderr)
+            sys.exit(1)
+        size = os.path.getsize('app/src/main/assets/rootfs.tar')
+        print(f'rootfs.tar downloaded: {size} bytes')
+        PYEOF
+        python3 /tmp/fetch-rootfs.py
         ls -la app/src/main/assets/rootfs.tar
       - chmod +x gradlew
       - ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
