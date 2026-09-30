@@ -46,6 +46,15 @@ android {
     androidResources {
         noCompress += listOf("tar", "gz")
     }
+
+    lint {
+        // targetSdk 28 is INTENTIONAL for this app: it's a system-level
+        // loader (proot/termux-style environment) that needs legacy external
+        // storage semantics — see the compileSdk comment above. The
+        // ExpiredTargetSdkVersion check fails lintVitalRelease on it
+        // (release pipeline #11); the target is documented, not stale.
+        disable += "ExpiredTargetSdkVersion"
+    }
 }
 
 kotlin {
