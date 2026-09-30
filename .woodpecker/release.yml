@@ -1,0 +1,129 @@
+# Release channel: signed APK + Forgejo release on tags (v*).
+#
+# Flow: tag v* pushed → build release APK → inject loader binaries
+# (inject-libs.sh) → sign with the release keystore → create a Forgejo
+# release with the APK attached.
+#
+# Signing story: this app has always shipped debug-signed direct APK
+# installs (no Play store, targetSdk 28 intentional). The release
+# keystore (letta-environment-release.jks, alias lettaenv) was generated
+# 2026-09-29 and lives in ~/.keystores/ with a backup in ~/backups/ —
+# CI consumes it via LETTAENV_KEYSTORE_B64 / LETTAENV_KEYSTORE_PASSWORD.
+#
+# Upload route: the APK is ~436MB, larger than the Cloudflare free-tier
+# 100MB request-body limit on git.angussoftware.dev. The Woodpecker
+# agent sits on the forgejo_default docker network, so release
+# uploads go direct to http://forgejo:3000 (docker DNS), bypassing
+# Cloudflare. Downloads (smaller, GET) use the public URL.
+#
+# This app does NOT go on Google Play — no AAB, no Play upload step.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    environment:
+      CI_NETRC_MACHINE: git.angussoftware.dev
+      CI_NETRC_USERNAME: coda
+      CI_NETRC_PASSWORD:
+        from_secret: FORGE_CLONE_TOKEN
+
+when:
+  - event: tag
+    ref: refs/tags/v*
+
+steps:
+  release:
+    image: localhost:5000/ci-theming-jdk23:latest
+    commands:
+      # Install Android SDK
+      - |
+        if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+        else
+          echo "Android SDK cached, skipping install"
+        fi
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+      # Fetch the build rootfs (gitignored, 162MB) from the internal
+      # rootfs-source release. (bracketed: token in URL would xtrace-print)
+      - |
+        set +x
+        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
+          "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source" \
+          -o /tmp/rootfs-rel.json
+        ROOTFS_URL=$(python3 -c "import json;print(json.load(open('/tmp/rootfs-rel.json'))['assets'][0]['browser_download_url'])")
+        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
+          "$ROOTFS_URL" \
+          -o app/src/main/assets/rootfs.tar
+        set -x
+        ls -la app/src/main/assets/rootfs.tar
+      # Decode the release keystore + extract the rootfs for inject-libs.sh
+      # (bracketed: B64 pipe, keystore writes, and keytool all expand secrets)
+      - |
+        set +x
+        printf '%s' "${LETTAENV_KEYSTORE_B64}" | base64 -d > /tmp/letta-environment-release.jks
+        keytool -list -keystore /tmp/letta-environment-release.jks -storepass "${LETTAENV_KEYSTORE_PASSWORD}" -alias lettaenv || { echo "KEYSTORE VERIFY FAILED"; exit 1; }
+        set -x
+        mkdir -p /tmp/lea-rootfs
+        tar -xf app/src/main/assets/rootfs.tar -C /tmp/lea-rootfs
+      # Build the APK
+      - chmod +x gradlew
+      - ./gradlew --no-daemon :app:assembleRelease
+      # Post-build surgery + release signing. inject-libs.sh v5 injects the
+      # loader binaries into lib/arm64-v8a, zipaligns, and signs — pointed
+      # at the release keystore via KS/KS_PASS env instead of debug.
+      - |
+        ROOTFS=/tmp/lea-rootfs \
+        KS=/tmp/letta-environment-release.jks \
+        KS_ALIAS=lettaenv \
+        KS_PASS="${LETTAENV_KEYSTORE_PASSWORD}" \
+        ./tools/inject-libs.sh app/build/outputs/apk/release/app-release-unsigned.apk
+      # Verify the release signature (not debug)
+      - |
+        APK=app/build/outputs/apk/release/app-release-unsigned.apk
+        $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
+        mv "$APK" "letta-environment-${CI_COMMIT_TAG##*/}.apk"
+      # Create the Forgejo release + attach the APK.
+      # Upload goes DIRECT to the forgejo container (docker network) — the
+      # ~436MB APK exceeds the Cloudflare 100MB body limit on the public URL.
+      # (bracketed: token in URL + curl data would xtrace-print)
+      - |
+        set +x
+        FORGE_API="https://git.angussoftware.dev/api/v1"
+        FORGE_DIRECT="http://forgejo:3000/api/v1"
+        REPO="repos/coda/letta-environment-android"
+        APK="letta-environment-${CI_COMMIT_TAG##*/}.apk"
+        # release notes: first lines of the tag annotation (fallback: tag name)
+        NOTES=$(git tag -l --format='%(contents)' "${CI_COMMIT_TAG}" | head -20 || echo "Release ${CI_COMMIT_TAG}")
+        ESCAPED_NOTES=$(printf '%s' "$NOTES" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+        # create release (direct route; falls back to public URL on failure)
+        create_release() {
+          curl -sf -X POST -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${CI_COMMIT_TAG}\",\"name\":\"${CI_COMMIT_TAG}\",\"body\":${ESCAPED_NOTES}}" \
+            "$1/$REPO/releases" -o /tmp/rel.json && return 0
+          return 1
+        }
+        create_release "$FORGE_DIRECT" || create_release "$FORGE_API" || { echo "FATAL: release creation failed"; exit 1; }
+        REL_ID=$(python3 -c "import json;print(json.load(open('/tmp/rel.json'))['id'])")
+        # attach APK (direct route; public URL would break at Cloudflare's 100MB)
+        curl -sf -X POST \
+          -H "Authorization: token ${FORGEJO_TOKEN}" \
+          -F "attachment=@${APK}" \
+          "$FORGE_DIRECT/$REPO/releases/$REL_ID/assets" || { echo "FATAL: APK upload failed"; exit 1; }
+        set -x
+        echo "=== Release ${CI_COMMIT_TAG} published with ${APK} ==="
+    environment:
+      GRADLE_USER_HOME: /root/.gradle
+      ANDROID_HOME: /opt/android-sdk
+      FORGEJO_TOKEN:
+        from_secret: FORGEJO_TOKEN
+      LETTAENV_KEYSTORE_B64:
+        from_secret: LETTAENV_KEYSTORE_B64
+      LETTAENV_KEYSTORE_PASSWORD:
+        from_secret: LETTAENV_KEYSTORE_PASSWORD
+    volumes:
+      - gradle-cache-lettaenv:/root/.gradle/caches
+      - gradle-wrapper-lettaenv:/root/.gradle/wrapper
+      - android-sdk-lettaenv:/opt/android-sdk

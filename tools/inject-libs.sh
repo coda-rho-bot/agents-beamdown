@@ -57,6 +57,14 @@ cp "$(dirname "$0")/../app/src/main/assets/proot-aarch64.tar.gz"  "$STAGE/assets
 
 python3 "$(dirname "$0")/inject.py" "$APK" "$STAGE"
 "$BT/zipalign" -f 4 "$APK" "$APK.aligned" && mv "$APK.aligned" "$APK"
-"$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android "$APK"
+# Signing: release keystore when KS is set (CI release builds), debug otherwise.
+# The APK is re-signed here because inject.py rewrites the zip after the
+# gradle signing pass — this sign step is the authoritative one.
+if [ -n "$KS" ]; then
+  "$BT/apksigner" sign --ks "$KS" --ks-key-alias "${KS_ALIAS:-lettaenv}" \
+    --ks-pass "pass:${KS_PASS?KS_PASS required with KS}" --key-pass "pass:${KS_PASS}" "$APK"
+else
+  "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android "$APK"
+fi
 echo "=== v5 injected + signed: $APK ==="
 unzip -l "$APK" | grep -E "lib/arm64-v8a/" | awk '{print $1, $4}'

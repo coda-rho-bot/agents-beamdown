@@ -1,0 +1,62 @@
+# Continuous build: unit tests + assembleDebug on push/PR to main.
+# The release pipeline (.woodpecker/release.yml) handles tag builds —
+# including the rootfs download and post-build APK injection, which
+# need the 162MB gitignored rootfs.tar and are release-only concerns.
+#
+# Repos are private on Forgejo — server-side netrc injection does not work
+# with this setup, so clone auth is explicit: CI_NETRC_* env sourced from
+# the repo-level FORGE_CLONE_TOKEN secret.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    environment:
+      CI_NETRC_MACHINE: git.angussoftware.dev
+      CI_NETRC_USERNAME: coda
+      CI_NETRC_PASSWORD:
+        from_secret: FORGE_CLONE_TOKEN
+
+when:
+  - event: [push, pull_request]
+    branch: [main]
+
+steps:
+  build:
+    image: localhost:5000/ci-theming-jdk23:latest
+    commands:
+      # Install Android SDK (required by AGP even for JVM-only steps)
+      - |
+        if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+        else
+          echo "Android SDK cached, skipping install"
+        fi
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+      # rootfs.tar is gitignored (162MB) — asset merge needs it present.
+      # Fetch the current build rootfs from the internal rootfs-source
+      # release attachment. (bracketed: token in URL would xtrace-print)
+      - |
+        set +x
+        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
+          "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source" \
+          -o /tmp/rootfs-rel.json
+        ROOTFS_URL=$(python3 -c "import json;print(json.load(open('/tmp/rootfs-rel.json'))['assets'][0]['browser_download_url'])")
+        curl -sfL -H "Authorization: token ${FORGEJO_TOKEN}" \
+          "$ROOTFS_URL" \
+          -o app/src/main/assets/rootfs.tar
+        set -x
+        ls -la app/src/main/assets/rootfs.tar
+      - chmod +x gradlew
+      - ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+    environment:
+      GRADLE_USER_HOME: /root/.gradle
+      ANDROID_HOME: /opt/android-sdk
+      FORGEJO_TOKEN:
+        from_secret: FORGEJO_TOKEN
+    volumes:
+      - gradle-cache-lettaenv:/root/.gradle/caches
+      - gradle-wrapper-lettaenv:/root/.gradle/wrapper
+      - android-sdk-lettaenv:/opt/android-sdk
