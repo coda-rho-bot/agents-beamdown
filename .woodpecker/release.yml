@@ -79,6 +79,7 @@ steps:
         KS=/tmp/letta-environment-release.jks \
         KS_ALIAS=lettaenv \
         KS_PASS="${LETTAENV_KEYSTORE_PASSWORD}" \
+        BT=$ANDROID_HOME/build-tools/36.0.0 \
         ./tools/inject-libs.sh app/build/outputs/apk/release/app-release-unsigned.apk
       # Verify the release signature (not debug)
       - |
