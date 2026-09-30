@@ -13,7 +13,7 @@
 # Upload route: the APK is ~436MB, larger than the Cloudflare free-tier
 # 100MB request-body limit on git.angussoftware.dev. The Woodpecker
 # agent sits on the forgejo_default docker network, so release
-# uploads go direct to http://forgejo:3000 (docker DNS), bypassing
+# uploads try host routes first (host.docker.internal, docker bridge
 # Cloudflare. Downloads (smaller, GET) use the public URL.
 #
 # Secret handling: leak-proof (angus-tasks PR #80 pattern, post-#287).
@@ -163,7 +163,7 @@ steps:
         APK = 'letta-environment-' + TAG.split('/')[-1] + '.apk'  # mirrors ${CI_COMMIT_TAG##*/}
         HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
         REPO = 'repos/coda/letta-environment-android'
-        ROUTES = ['http://forgejo:3000/api/v1', 'https://git.angussoftware.dev/api/v1']
+        ROUTES = ['http://host.docker.internal:3000/api/v1', 'http://172.17.0.1:3000/api/v1', 'http://forgejo:3000/api/v1', 'https://git.angussoftware.dev/api/v1']
         def fatal(msg):
             print('FATAL: ' + msg, file=sys.stderr)
             sys.exit(1)
