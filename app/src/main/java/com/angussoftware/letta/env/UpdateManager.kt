@@ -73,7 +73,7 @@ object UpdateManager {
     // Public releases-only mirror (release pipeline dual-publishes here).
     // Anonymous fetch — no token needed for release builds.
     private const val FEED_URL =
-        "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-releases/releases/latest"
+        "https://dl.angussoftware.dev/letta-environment/latest.json"
     private const val CHECK_INTERVAL_MS = 5 * 60 * 60 * 1000L   // spec: ~4-6h
     private const val TICK_MS = 30 * 60 * 1000L                // periodic tick granularity
     private const val OVERNIGHT_START_HOUR = 1                // 01:00 local
