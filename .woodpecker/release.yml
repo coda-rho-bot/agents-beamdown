@@ -146,7 +146,10 @@ steps:
         APK=app/build/outputs/apk/release/app-release-unsigned.apk
         $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
         mv "$APK" "letta-environment-${CI_COMMIT_TAG##*/}.apk"
-      # Create the Forgejo release + attach the APK.
+      # Create the Forgejo release + attach the APK — TWICE, dual-publish:
+      #   1. repos/coda/letta-environment-android  (private, canonical)
+      #   2. repos/coda/letta-environment-releases (public, releases-only
+      #      mirror = the self-updater FEED + public beta download)
       # Upload goes DIRECT to the forgejo container (docker network) — the
       # ~436MB APK exceeds the Cloudflare 100MB body limit on the public URL.
       # Leak-proof (PR #80 pattern, post-#287): FORGEJO_TOKEN consumed ONLY
@@ -162,7 +165,11 @@ steps:
         TAG = os.environ['CI_COMMIT_TAG']
         APK = 'letta-environment-' + TAG.split('/')[-1] + '.apk'  # mirrors ${CI_COMMIT_TAG##*/}
         HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
-        REPO = 'repos/coda/letta-environment-android'
+        # Dual-publish: private canonical repo + public releases-only mirror
+        # (the mirror IS the self-updater feed — its releases/latest serves
+        # the installed app, anonymous-downloadable).
+        REPOS = ['repos/coda/letta-environment-android',
+                 'repos/coda/letta-environment-releases']
         ROUTES = ['http://host.docker.internal:3000/api/v1', 'http://172.17.0.1:3000/api/v1', 'http://forgejo:3000/api/v1', 'https://git.angussoftware.dev/api/v1']
         def fatal(msg):
             print('FATAL: ' + msg, file=sys.stderr)
@@ -177,29 +184,28 @@ steps:
         if not notes.strip():
             notes = 'Release ' + TAG
         # create release (direct route first; falls back to public URL)
-        rel_id = None
-        for base in ROUTES:
-            try:
-                req = urllib.request.Request(
-                    f'{base}/{REPO}/releases',
-                    data=json.dumps({'tag_name': TAG, 'name': TAG, 'body': notes}).encode(),
-                    headers={**HDRS, 'Content-Type': 'application/json'}, method='POST')
-                resp = urllib.request.urlopen(req, timeout=120)
-                rel = json.load(resp)
-                rel_id = rel['id']
-                print(f'release {TAG} created (id={rel_id}, route={base})')
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 409:
-                    print(f'release {TAG} already exists — fetching id')
-                    req = urllib.request.Request(f'{base}/{REPO}/releases/tags/{TAG}', headers=HDRS)
-                    rel_id = json.load(urllib.request.urlopen(req, timeout=120))['id']
-                    break
-                print(f'route {base} failed: {e.code} {e.reason}')
-            except Exception as e:
-                print(f'route {base} failed: {e}')
-        if rel_id is None:
-            fatal('release creation failed on all routes')
+        def create_release(base, repo):
+            req = urllib.request.Request(
+                f'{base}/{repo}/releases',
+                data=json.dumps({'tag_name': TAG, 'name': TAG, 'body': notes}).encode(),
+                headers={**HDRS, 'Content-Type': 'application/json'}, method='POST')
+            resp = urllib.request.urlopen(req, timeout=120)
+            rel = json.load(resp)
+            print(f'{repo}: release {TAG} created (id={rel["id"]}, route={base})')
+            return rel['id']
+        def release_id_for(repo):
+            for base in ROUTES:
+                try:
+                    return create_release(base, repo)
+                except urllib.error.HTTPError as e:
+                    if e.code == 409:
+                        print(f'{repo}: release {TAG} already exists — fetching id')
+                        req = urllib.request.Request(f'{base}/{repo}/releases/tags/{TAG}', headers=HDRS)
+                        return json.load(urllib.request.urlopen(req, timeout=120))['id']
+                    print(f'route {base} failed: {e.code} {e.reason}')
+                except Exception as e:
+                    print(f'route {base} failed: {e}')
+            return None
         # attach APK (direct route; public URL would break at Cloudflare's
         # 100MB body limit for the ~436MB APK). Streamed via http.client —
         # the APK never sits in memory whole.
@@ -212,11 +218,11 @@ steps:
                 f'Content-Disposition: form-data; name="attachment"; filename="{APK}"\r\n'
                 f'Content-Type: application/vnd.android.package-archive\r\n\r\n').encode()
         tail = f'\r\n--{boundary}--\r\n'.encode()
-        def upload(base):
+        def upload(base, repo, rel_id):
             u = urlsplit(base)
             cls = http.client.HTTPSConnection if u.scheme == 'https' else http.client.HTTPConnection
             conn = cls(u.hostname, u.port or (443 if u.scheme == 'https' else 80), timeout=1800)
-            path = f'{u.path}/{REPO}/releases/{rel_id}/assets'
+            path = f'{u.path}/{repo}/releases/{rel_id}/assets'
             conn.putrequest('POST', path)
             conn.putheader('User-Agent', HDRS['User-Agent'])
             conn.putheader('Authorization', HDRS['Authorization'])
@@ -232,16 +238,20 @@ steps:
             body = resp.read().decode(errors='replace')
             if resp.status not in (200, 201):
                 raise RuntimeError(f'{resp.status}: {body[:300]}')
-            print(f'APK uploaded (route={base}, status={resp.status})')
-        for base in ROUTES:
-            try:
-                upload(base)
-                break
-            except Exception as e:
-                print(f'upload route {base} failed: {e}')
-        else:
-            fatal('APK upload failed on all routes')
-        print(f'=== Release {TAG} published with {APK} ===')
+            print(f'{repo}: APK uploaded (route={base}, status={resp.status})')
+        for repo in REPOS:
+            rel_id = release_id_for(repo)
+            if rel_id is None:
+                fatal(f'{repo}: release creation failed on all routes')
+            for base in ROUTES:
+                try:
+                    upload(base, repo, rel_id)
+                    break
+                except Exception as e:
+                    print(f'{repo}: upload route {base} failed: {e}')
+            else:
+                fatal(f'{repo}: APK upload failed on all routes')
+        print(f'=== Release {TAG} published with {APK} on {len(REPOS)} repos ===')
         PYEOF
         python3 /tmp/publish-release.py
     environment:
