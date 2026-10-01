@@ -84,4 +84,24 @@ class UpdateManagerTest {
         assertFalse(UpdateManager.isNewer(null, "0.3.2"))
         assertFalse(UpdateManager.isNewer("", "0.3.2"))
     }
+
+    // ---- isDownloadStale ------------------------------------------------------
+
+    @Test
+    fun downloadStaleWhenTagMovedOn() {
+        assertTrue(UpdateManager.isDownloadStale("v0.4.0", "v0.4.1"))   // feed replaced the tag
+        assertTrue(UpdateManager.isDownloadStale("v0.4.1", "v0.4.0"))   // known update went backwards — supersede anyway
+    }
+
+    @Test
+    fun downloadNotStaleWhenTagsMatch() {
+        assertFalse(UpdateManager.isDownloadStale("v0.4.0", "v0.4.0"))
+    }
+
+    @Test
+    fun downloadNotStaleWhenEitherSideMissing() {
+        assertFalse(UpdateManager.isDownloadStale(null, "v0.4.0"))   // no download yet
+        assertFalse(UpdateManager.isDownloadStale("v0.4.0", null))   // no known update
+        assertFalse(UpdateManager.isDownloadStale(null, null))
+    }
 }

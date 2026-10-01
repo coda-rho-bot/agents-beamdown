@@ -39,8 +39,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Install: ACTION_VIEW application/vnd.android.package-archive with a
  * FileProvider URI. Android refuses mismatched signatures at install time,
  * so a hijacked feed can't install a different app — signature safety is
- * free. targetSdk 28 keeps background activity starts allowed, so the
- * service can open the installer for the overnight auto path; the system
+ * free. Background activity starts: the background-start restriction keys
+ * on the DEVICE's Android version (Android 10+ blocks background starts
+ * regardless of targetSdk — targetSdk 28 does NOT exempt an app on a modern
+ * device). On modern devices the overnight auto path relies on the
+ * accessibility-service exemption: an app with an active, bound
+ * AccessibilityService is allowed to start activities from the background
+ * (the service must be enabled, and Android can revoke it). On pre-10
+ * devices targetSdk 28 keeps the legacy path. Either way the system
  * installer still shows its own confirmation screen (documented honestly
  * in the settings copy — this app cannot silently install itself).
  *
@@ -58,6 +64,7 @@ object UpdateManager {
     const val PREF_LAST_CHECK = "update_last_check_ms"
     const val PREF_DL_ID = "update_dl_id"              // DownloadManager enqueue id
     const val PREF_DL_DONE = "update_dl_done"          // download reached SUCCESSFUL
+    const val PREF_DL_TAG = "update_dl_tag"            // tag the persisted download belongs to
     const val PREF_INSTALL_FIRED_FOR = "update_install_fired_for" // auto path: installer already opened for this tag (user cancel ≠ ask again every tick)
 
     const val MODE_PROMPT = "prompt"
@@ -136,6 +143,16 @@ object UpdateManager {
         }
         return false // equal
     }
+
+    /**
+     * True when the persisted download belongs to a different release than
+     * the currently known update — the feed moved on while a download sat
+     * on disk (mid-download or downloaded-but-not-installed). The stale
+     * download must be cleared and the new tag re-offered; a null on
+     * either side is "not stale" (no download yet / no known update).
+     */
+    fun isDownloadStale(dlTag: String?, updateTag: String?): Boolean =
+        dlTag != null && updateTag != null && dlTag != updateTag
 
     // ---- feed check ----------------------------------------------------------
 
@@ -233,6 +250,19 @@ object UpdateManager {
     }
 
     /**
+     * Stale-download supersede: when the persisted download belongs to a
+     * tag the feed has since replaced, drop it (file + state) and return
+     * true so callers re-offer the new tag. Returns false when there is
+     * nothing to supersede.
+     */
+    private fun supersedeStaleDownload(context: Context): Boolean {
+        val p = prefs(context)
+        val stale = isDownloadStale(p.getString(PREF_DL_TAG, null), p.getString(PREF_UPDATE_TAG, null))
+        if (stale) clearDownload(context)
+        return stale
+    }
+
+    /**
      * Reconcile persisted download state from DownloadManager truth. Covers
      * the case where the process died mid-download (its ACTION_DOWNLOAD_
      * COMPLETE receiver is gone): the UI tick calls this before rendering,
@@ -242,6 +272,7 @@ object UpdateManager {
     fun reconcileDownloadState(context: Context) {
         val app = context.applicationContext
         val p = prefs(app)
+        if (supersedeStaleDownload(app)) return
         val id = p.getLong(PREF_DL_ID, -1)
         if (id == -1L || p.getBoolean(PREF_DL_DONE, false)) return
         when (downloadStatus(app, id)) {
@@ -269,11 +300,36 @@ object UpdateManager {
             .remove(PREF_UPDATE_URL)
             .remove(PREF_DL_ID)
             .remove(PREF_DL_DONE)
+            .remove(PREF_DL_TAG)
             .remove(PREF_INSTALL_FIRED_FOR)
             .apply()
     }
 
     // ---- download ------------------------------------------------------------
+
+    /**
+     * Clear any persisted download (cancel in-flight, delete file, drop
+     * prefs) WITHOUT touching the known-update state — used when the
+     * download turns out to be for a stale tag: the new tag is then
+     * re-offered fresh. [clearAvailable] stays the full-reset for when
+     * no update is known at all.
+     */
+    private fun clearDownload(context: Context) {
+        val app = context.applicationContext
+        val p = prefs(app)
+        val id = p.getLong(PREF_DL_ID, -1)
+        if (id != -1L) {
+            runCatching {
+                (app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).remove(id)
+            }
+        }
+        downloadedFile(app)?.delete()
+        p.edit()
+            .remove(PREF_DL_ID)
+            .remove(PREF_DL_DONE)
+            .remove(PREF_DL_TAG)
+            .apply()
+    }
 
     /** Enqueue the APK download via DownloadManager. False when no URL known. */
     fun enqueueDownload(context: Context): Boolean {
@@ -289,6 +345,7 @@ object UpdateManager {
         p.edit()
             .putLong(PREF_DL_ID, id)
             .putBoolean(PREF_DL_DONE, false)
+            .putString(PREF_DL_TAG, tag)
             .apply()
         registerCompleteReceiver(app)
         return true
@@ -338,8 +395,12 @@ object UpdateManager {
                         p.getString(PREF_INSTALL_FIRED_FOR, null) != tag &&
                         overnightConditionsHold(app)
                     ) {
-                        p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
-                        install(app)
+                        // Guard is consumed ONLY if the installer intent
+                        // actually fired — a missing install grant must not
+                        // burn the one-shot for the night.
+                        if (install(app)) {
+                            p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
+                        }
                     }
                 } else {
                     p.edit().remove(PREF_DL_ID).putBoolean(PREF_DL_DONE, false).apply()
@@ -361,6 +422,9 @@ object UpdateManager {
         if (p.getString(PREF_UPDATE_MODE, MODE_PROMPT) != MODE_AUTO_OVERNIGHT) return
         val tag = p.getString(PREF_UPDATE_TAG, null) ?: return
         if (!overnightConditionsHold(app)) return
+        // Stale download for an older tag: supersede, then fall through —
+        // id==−1 re-enqueues the CURRENT tag on this same tick.
+        supersedeStaleDownload(app)
         val id = p.getLong(PREF_DL_ID, -1)
         when {
             id == -1L -> enqueueDownload(app)
@@ -368,10 +432,13 @@ object UpdateManager {
                 // Fire the installer at most ONCE per tag on the auto path —
                 // a user cancelling the 2AM system dialog must not have it
                 // re-opened every 30 minutes until 5AM. The card's Install
-                // button stays available for a manual retry.
+                // button stays available for a manual retry. Guard consumed
+                // only on a fired intent (missing install grant doesn't burn
+                // the shot — next tick retries after the user grants).
                 if (p.getString(PREF_INSTALL_FIRED_FOR, null) != tag) {
-                    p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
-                    install(app)
+                    if (install(app)) {
+                        p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
+                    }
                 }
             }
             else -> {
@@ -401,18 +468,26 @@ object UpdateManager {
     // ---- install -------------------------------------------------------------
 
     /**
-     * Open the system package installer for the downloaded APK. When the
-     * one-time "install unknown apps" grant is missing, routes to the
-     * per-app grant settings page instead (the grant is a user decision;
-     * the app can only ask). Signature safety is enforced by Android itself:
-     * an install with a mismatched signing certificate is refused.
+     * Open the system package installer for the downloaded APK. Returns
+     * true only when the installer intent itself fired — false when the
+     * one-time "install unknown apps" grant is missing (routes to the
+     * per-app grant settings page instead; the grant is a user decision,
+     * the app can only ask) or when preconditions fail. The auto-overnight
+     * path consumes its one-shot fired-guard ONLY on a true return, so a
+     * missing grant doesn't burn the night: once the user grants, the next
+     * tick retries the install. Signature safety is enforced by Android
+     * itself: an install with a mismatched signing certificate is refused.
      */
-    fun install(context: Context) {
+    fun install(context: Context): Boolean {
         val app = context.applicationContext
         val p = prefs(app)
-        if (!p.getBoolean(PREF_DL_DONE, false)) return
-        val file = downloadedFile(app) ?: return
-        if (!file.exists()) return
+        // Install-time supersede: the download on disk may be for a tag the
+        // feed has since replaced — never install a stale APK. Drop it and
+        // let the caller re-offer the new tag.
+        if (supersedeStaleDownload(app)) return false
+        if (!p.getBoolean(PREF_DL_DONE, false)) return false
+        val file = downloadedFile(app) ?: return false
+        if (!file.exists()) return false
         if (!app.packageManager.canRequestPackageInstalls()) {
             runCatching {
                 app.startActivity(
@@ -422,16 +497,19 @@ object UpdateManager {
                     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
             }
-            return
+            return false // grant missing — do NOT consume the auto guard
         }
         val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        // targetSdk 28: background activity starts are allowed, so the
-        // service context can open the installer for the overnight path.
-        runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        // Background-start honesty: the restriction keys on the DEVICE's
+        // Android version, not targetSdk — on Android 10+ this works via the
+        // a11y-service exemption (bound AgentAccessibilityService), on
+        // pre-10 via the legacy path. runCatching: if the exemption doesn't
+        // hold, the manual Install button in the UI is the fallback.
+        return runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
     }
 
     private fun downloadedFile(context: Context): File? {
