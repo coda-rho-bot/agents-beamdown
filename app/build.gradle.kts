@@ -17,12 +17,13 @@ android {
         versionCode = 12
         versionName = "0.3.2"
 
-        // Self-updater feed auth: the Forgejo repo is PRIVATE, so the
-        // unauthenticated releases/latest request 404s. An optional
-        // read-only token can be baked in at build time:
-        //   ./gradlew -PupdateFeedToken=... :app:assembleRelease
-        // Empty (default) = unauthenticated request, which is correct the
-        // day the repo/releases go public. Build input only — never commit.
+        // Self-updater feed auth: the feed is the PUBLIC releases mirror
+        // (coda/letta-environment-releases) — unauthenticated fetch is the
+        // release default. An optional read token can still be baked in at
+        // build time for debug builds pointed at private feeds:
+        //   ./gradlew -PupdateFeedToken=... :app:assembleDebug
+        // Empty (default) = unauthenticated request. Build input only —
+        // never commit.
         buildConfigField(
             "String",
             "UPDATE_FEED_TOKEN",

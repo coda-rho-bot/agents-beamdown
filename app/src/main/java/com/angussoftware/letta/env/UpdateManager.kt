@@ -18,12 +18,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Self-updater (ships in v0.4.0; spec Harry Sep 30 2026).
  *
- * Feed: Forgejo releases API of this repo. The repo is PRIVATE, so the
- * unauthenticated request 404s — an optional read token can be baked in at
- * build time via -PupdateFeedToken=... (BuildConfig.UPDATE_FEED_TOKEN);
- * empty token = unauthenticated request, which is the correct behavior the
- * day the repo/releases go public. The token is a build input, never source
- * control.
+ * Feed: Forgejo releases API of the public releases-only mirror repo
+ * (coda/letta-environment-releases — the release pipeline dual-publishes
+ * every tag there). Anonymous fetch, no auth. An optional read token can
+ * still be baked in at build time via -PupdateFeedToken=...
+ * (BuildConfig.UPDATE_FEED_TOKEN) as a debug aid against private feeds;
+ * empty token (default) = unauthenticated request, which is correct for
+ * the public feed. The token is a build input, never source control.
  *
  * Scheduling: no new always-running process. The periodic tick rides the
  * existing foreground service ([startPeriodicChecks] is idempotent); the
@@ -62,8 +63,10 @@ object UpdateManager {
     const val MODE_PROMPT = "prompt"
     const val MODE_AUTO_OVERNIGHT = "auto_overnight"
 
+    // Public releases-only mirror (release pipeline dual-publishes here).
+    // Anonymous fetch — no token needed for release builds.
     private const val FEED_URL =
-        "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/latest"
+        "https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-releases/releases/latest"
     private const val CHECK_INTERVAL_MS = 5 * 60 * 60 * 1000L   // spec: ~4-6h
     private const val TICK_MS = 30 * 60 * 1000L                // periodic tick granularity
     private const val OVERNIGHT_START_HOUR = 1                // 01:00 local
