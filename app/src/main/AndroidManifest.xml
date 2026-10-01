@@ -18,6 +18,14 @@
          (server offline ~7h, stale cloud connection). targetSdk 28 keeps
          this permission usable on modern Android. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Self-updater (v0.4.0): lets the app ASK to install the downloaded
+         update APK. The actual grant is the user's one-time "install
+         unknown apps" decision in system settings — Android routes the
+         request there and refuses installs without it. Signature safety
+         is enforced by the OS at install time (mismatched signing
+         certificates are rejected), so a hijacked feed cannot install a
+         different app. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:label="Letta Environment"
@@ -61,5 +69,19 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Self-updater: serves the downloaded update APK to the system
+             installer (content:// URI — file:// ACTION_VIEW is banned on
+             API 24+). Scope is only the app's own external-files updates
+             dir; nothing else is shareable. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

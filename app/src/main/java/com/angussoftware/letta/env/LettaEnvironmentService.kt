@@ -70,6 +70,14 @@ class LettaEnvironmentService : Service() {
         const val ACTION_RESTART = "com.angussoftware.letta.env.action.RESTART"
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
+
+        /**
+         * True when no agent session/environment process is running (idle,
+         * per the v0.2.8 lifecycle state machine). The self-updater gates
+         * its prompts and overnight auto-installs on this — never update
+         * out from under a live session.
+         */
+        fun isEnvironmentIdle(): Boolean = lifecycle.get() == State.IDLE
     }
 
     private fun apiKey(): String =
@@ -85,6 +93,9 @@ class LettaEnvironmentService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
+        // Self-updater periodic checks ride this already-running foreground
+        // service — no new always-running process (spec Sep 30).
+        UpdateManager.startPeriodicChecks(this)
 
         // agentctl notify: title/text extras on a broadcast routed here
         if (intent?.action == "com.angussoftware.letta.env.AGENT_NOTIFY") {

@@ -76,6 +76,12 @@ class MainActivity : android.app.Activity() {
     private lateinit var logScroll: ScrollView
     private lateinit var logView: TextView
     private var logExpanded = false
+    // Self-updater (v0.4.0): update card views — nullable because the card
+    // only exists on the main layout (never onboarding), and the tick
+    // guards on initialization anyway.
+    private var updateCard: LinearLayout? = null
+    private var updateText: TextView? = null
+    private var updateBtn: Button? = null
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -86,6 +92,10 @@ class MainActivity : android.app.Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         resolvePalette()
+        // Self-updater: on-start check (clears stale state when we're current,
+        // resumes a download that outlived the process, then force-checks the
+        // feed). Spec: update check on app start.
+        UpdateManager.onAppStart(this)
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
             showOnboarding()
@@ -389,6 +399,97 @@ class MainActivity : android.app.Activity() {
         root.addView(actionCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
+        // ---- self-updater: update card (IDLE only — queued while running) ----
+        // Visibility is driven by renderUpdateCard() on the 2s tick: hidden
+        // while an agent session runs, shown when idle AND an update is known.
+        updateCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+            visibility = View.GONE
+        }
+        updateText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(C.textPrimary)
+        }
+        updateBtn = Button(this).apply {
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener {
+                val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+                when {
+                    p.getBoolean(UpdateManager.PREF_DL_DONE, false) -> UpdateManager.install(this@MainActivity)
+                    p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> Unit // in-flight; tick shows progress
+                    else -> UpdateManager.enqueueDownload(this@MainActivity)
+                }
+            }
+        }
+        updateCard!!.addView(updateText)
+        updateCard!!.addView(updateBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(updateCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- self-updater: update-mode setting row ----
+        // Default "Prompt when idle"; optional "Install automatically
+        // overnight" (charging + idle, 1–5 AM). Both still go through the
+        // system installer — Android requires the one-time "install unknown
+        // apps" grant for this app, and the installer shows its own
+        // confirmation. Honest copy: this app cannot silently install.
+        val updateMode = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getString(UpdateManager.PREF_UPDATE_MODE, UpdateManager.MODE_PROMPT)
+        val settingsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+        }
+        val settingsLabel = TextView(this).apply {
+            text = "App updates"
+            textSize = 14f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val modeBtn = Button(this).apply {
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            text = if (updateMode == UpdateManager.MODE_AUTO_OVERNIGHT)
+                "Mode: Install automatically overnight" else "Mode: Prompt when idle"
+            setOnClickListener {
+                val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+                val newMode = if (p.getString(UpdateManager.PREF_UPDATE_MODE, UpdateManager.MODE_PROMPT) == UpdateManager.MODE_AUTO_OVERNIGHT)
+                    UpdateManager.MODE_PROMPT else UpdateManager.MODE_AUTO_OVERNIGHT
+                p.edit().putString(UpdateManager.PREF_UPDATE_MODE, newMode).apply()
+                text = if (newMode == UpdateManager.MODE_AUTO_OVERNIGHT)
+                    "Mode: Install automatically overnight" else "Mode: Prompt when idle"
+                val msg = if (newMode == UpdateManager.MODE_AUTO_OVERNIGHT) {
+                    "Between 1–5 AM, while charging and no agent session is running, the app " +
+                        "downloads the update and opens the system installer. Android still " +
+                        "requires the one-time \"install unknown apps\" grant for this app " +
+                        "(first install attempt routes you to that setting), and the installer " +
+                        "shows its own confirmation screen."
+                } else {
+                    "The update card appears on the main screen while the environment is idle."
+                }
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+        val modeExplain = TextView(this).apply {
+            text = "Automatic overnight install still needs the one-time system \"install unknown apps\" grant and shows the installer's confirmation screen."
+            textSize = 11f
+            setTextColor(C.textSecondary)
+            setPadding(0, dp(6), 0, 0)
+        }
+        settingsCard.addView(settingsLabel)
+        settingsCard.addView(modeBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        settingsCard.addView(modeExplain)
+        root.addView(settingsCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
         // ---- collapsible log card ----
         logCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -684,6 +785,7 @@ class MainActivity : android.app.Activity() {
                 (v as? TextView)?.text = "key: ${maskKey(prefs.getString(PREF_KEY, ""))}"
             }
             renderVersionLine()
+            renderUpdateCard()
             // Battery banner: re-evaluated each tick; clears itself when granted.
             // Phone-control card: live state each tick (grant/revoke reflects in 2s)
             a11yDotView?.setTextColor(if (isA11yEnabled()) C.ok else C.warn)
@@ -718,6 +820,56 @@ class MainActivity : android.app.Activity() {
     /** Prefix-only masking — old version leaked 3 secret-body chars (task_92 #8). */
     private fun maskKey(key: String?): String =
         if (key.isNullOrBlank()) "not set" else "sk-let-" + "•".repeat(6) + key.takeLast(4)
+
+    /**
+     * Self-updater card state machine (2s tick):
+     *  - no update known            → hidden
+     *  - update known, RUNNING      → hidden (queued until idle — spec)
+     *  - update known, IDLE         → "vX.Y.Z available — Download"
+     *  - downloading                → progress % (any state; once the user
+     *                                taps Download we don't yank the card)
+     *  - downloaded                 → "Install" (routes to the unknown-apps
+     *                                grant settings when missing)
+     * Also drives a periodic feed check while the UI is open (5h-gated
+     * inside UpdateManager).
+     */
+    private fun renderUpdateCard() {
+        val card = updateCard ?: return
+        val tv = updateText ?: return
+        val btn = updateBtn ?: return
+        UpdateManager.maybeCheckAsync(this)
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val tag = p.getString(UpdateManager.PREF_UPDATE_TAG, null)
+        val dlId = p.getLong(UpdateManager.PREF_DL_ID, -1)
+        val dlDone = p.getBoolean(UpdateManager.PREF_DL_DONE, false)
+        val idle = LettaEnvironmentService.isEnvironmentIdle()
+        when {
+            tag == null -> card.visibility = View.GONE
+            dlDone -> {
+                card.visibility = View.VISIBLE
+                tv.text = "$tag downloaded"
+                tv.setTextColor(C.textPrimary)
+                btn.text = "Install"
+                btn.isEnabled = true
+            }
+            dlId != -1L -> {
+                val pct = UpdateManager.downloadProgress(this, dlId)
+                card.visibility = View.VISIBLE
+                tv.text = if (pct != null) "Downloading $tag — $pct%" else "Downloading $tag…"
+                tv.setTextColor(C.warn)
+                btn.text = "Downloading…"
+                btn.isEnabled = false
+            }
+            !idle -> card.visibility = View.GONE // queued while a session runs
+            else -> {
+                card.visibility = View.VISIBLE
+                tv.text = "$tag available"
+                tv.setTextColor(C.textPrimary)
+                btn.text = "Download"
+                btn.isEnabled = true
+            }
+        }
+    }
 }
 
 /** Bounded tail read: seek near end, return last complete lines. */

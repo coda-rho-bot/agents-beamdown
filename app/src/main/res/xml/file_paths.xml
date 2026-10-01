@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Self-updater: expose ONLY the app-external updates dir to the system
+     package installer via FileProvider. DownloadManager writes there;
+     nothing else in the app's storage is shareable through this provider. -->
+<paths>
+    <external-files-path name="updates" path="updates/" />
+</paths>

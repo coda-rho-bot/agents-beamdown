@@ -16,6 +16,18 @@ android {
         targetSdk = 28
         versionCode = 12
         versionName = "0.3.2"
+
+        // Self-updater feed auth: the Forgejo repo is PRIVATE, so the
+        // unauthenticated releases/latest request 404s. An optional
+        // read-only token can be baked in at build time:
+        //   ./gradlew -PupdateFeedToken=... :app:assembleRelease
+        // Empty (default) = unauthenticated request, which is correct the
+        // day the repo/releases go public. Build input only — never commit.
+        buildConfigField(
+            "String",
+            "UPDATE_FEED_TOKEN",
+            "\"${project.findProperty("updateFeedToken") ?: ""}\""
+        )
     }
 
     buildTypes {
@@ -73,4 +85,8 @@ dependencies {
     implementation("org.jetbrains.compose.ui:ui:1.11.1")
 
     testImplementation("junit:junit:4.13.2")
+    // org.json is stubbed in the android.jar used by LOCAL unit tests (every
+    // method throws "not mocked") — the real implementation is test-only;
+    // on-device the framework provides it.
+    testImplementation("org.json:json:20240303")
 }
