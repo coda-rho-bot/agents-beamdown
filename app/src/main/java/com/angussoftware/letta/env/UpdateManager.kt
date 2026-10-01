@@ -57,6 +57,7 @@ object UpdateManager {
     const val PREF_LAST_CHECK = "update_last_check_ms"
     const val PREF_DL_ID = "update_dl_id"              // DownloadManager enqueue id
     const val PREF_DL_DONE = "update_dl_done"          // download reached SUCCESSFUL
+    const val PREF_INSTALL_FIRED_FOR = "update_install_fired_for" // auto path: installer already opened for this tag (user cancel ≠ ask again every tick)
 
     const val MODE_PROMPT = "prompt"
     const val MODE_AUTO_OVERNIGHT = "auto_overnight"
@@ -228,6 +229,27 @@ object UpdateManager {
         maybeCheckAsync(app, force = true)
     }
 
+    /**
+     * Reconcile persisted download state from DownloadManager truth. Covers
+     * the case where the process died mid-download (its ACTION_DOWNLOAD_
+     * COMPLETE receiver is gone): the UI tick calls this before rendering,
+     * so a finished download flips to Install instead of sitting at
+     * "Downloading… 100%" forever.
+     */
+    fun reconcileDownloadState(context: Context) {
+        val app = context.applicationContext
+        val p = prefs(app)
+        val id = p.getLong(PREF_DL_ID, -1)
+        if (id == -1L || p.getBoolean(PREF_DL_DONE, false)) return
+        when (downloadStatus(app, id)) {
+            DownloadManager.STATUS_SUCCESSFUL ->
+                p.edit().putBoolean(PREF_DL_DONE, true).apply()
+            DownloadManager.STATUS_FAILED ->
+                p.edit().remove(PREF_DL_ID).putBoolean(PREF_DL_DONE, false).apply()
+            else -> Unit // pending/running/paused — UI polls progress
+        }
+    }
+
     /** Drop all update state + cancel/delete any active or finished download. */
     fun clearAvailable(context: Context) {
         val app = context.applicationContext
@@ -244,6 +266,7 @@ object UpdateManager {
             .remove(PREF_UPDATE_URL)
             .remove(PREF_DL_ID)
             .remove(PREF_DL_DONE)
+            .remove(PREF_INSTALL_FIRED_FOR)
             .apply()
     }
 
@@ -304,9 +327,15 @@ object UpdateManager {
                     // Overnight auto mode: open the installer right away when
                     // the conditions still hold (re-checked — the 436MB
                     // download takes a while and the world may have changed).
+                    // Once-per-tag guard: a user cancelling the system dialog
+                    // must not see it re-opened on later ticks.
+                    val tag = p.getString(PREF_UPDATE_TAG, null)
                     if (p.getString(PREF_UPDATE_MODE, MODE_PROMPT) == MODE_AUTO_OVERNIGHT &&
+                        tag != null &&
+                        p.getString(PREF_INSTALL_FIRED_FOR, null) != tag &&
                         overnightConditionsHold(app)
                     ) {
+                        p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
                         install(app)
                     }
                 } else {
@@ -327,12 +356,33 @@ object UpdateManager {
         val app = context.applicationContext
         val p = prefs(app)
         if (p.getString(PREF_UPDATE_MODE, MODE_PROMPT) != MODE_AUTO_OVERNIGHT) return
-        if (p.getString(PREF_UPDATE_TAG, null) == null) return
+        val tag = p.getString(PREF_UPDATE_TAG, null) ?: return
         if (!overnightConditionsHold(app)) return
         val id = p.getLong(PREF_DL_ID, -1)
         when {
             id == -1L -> enqueueDownload(app)
-            p.getBoolean(PREF_DL_DONE, false) -> install(app)
+            p.getBoolean(PREF_DL_DONE, false) -> {
+                // Fire the installer at most ONCE per tag on the auto path —
+                // a user cancelling the 2AM system dialog must not have it
+                // re-opened every 30 minutes until 5AM. The card's Install
+                // button stays available for a manual retry.
+                if (p.getString(PREF_INSTALL_FIRED_FOR, null) != tag) {
+                    p.edit().putString(PREF_INSTALL_FIRED_FOR, tag).apply()
+                    install(app)
+                }
+            }
+            else -> {
+                // In-flight download with no process-death-surviving receiver
+                // (ACTION_DOWNLOAD_COMPLETE broadcast may have arrived while
+                // nothing was listening): reconcile from DownloadManager truth.
+                when (downloadStatus(app, id)) {
+                    DownloadManager.STATUS_SUCCESSFUL ->
+                        p.edit().putBoolean(PREF_DL_DONE, true).apply()
+                    DownloadManager.STATUS_FAILED ->
+                        p.edit().remove(PREF_DL_ID).putBoolean(PREF_DL_DONE, false).apply()
+                    else -> Unit // still running/paused
+                }
+            }
         }
     }
 

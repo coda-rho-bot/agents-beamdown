@@ -838,6 +838,7 @@ class MainActivity : android.app.Activity() {
         val tv = updateText ?: return
         val btn = updateBtn ?: return
         UpdateManager.maybeCheckAsync(this)
+        UpdateManager.reconcileDownloadState(this)
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         val tag = p.getString(UpdateManager.PREF_UPDATE_TAG, null)
         val dlId = p.getLong(UpdateManager.PREF_DL_ID, -1)
