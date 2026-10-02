@@ -118,7 +118,14 @@ class AgentAccessibilityService : AccessibilityService() {
         val cmd = req.optString("cmd")
         // Session requests block on the USER, not the main thread — bypass the
         // 15s main-handler latch and run the wait on the socket thread.
+        // Telemetry commands (health/location/notiflist-status) touch no a11y
+        // APIs and make suspend-adjacent IPC calls — socket thread too.
         if (cmd == "session") return requestConsent(req)
+        if (cmd.startsWith("health") || cmd == "location" || cmd == "notifstatus") {
+            return runCatching { handle(cmd, req) }
+                .recover { JSONObject().put("ok", false).put("error", it.message ?: it.javaClass.simpleName) }
+                .getOrThrow()
+        }
         val latch = java.util.concurrent.CountDownLatch(1)
         var result = JSONObject().put("ok", false).put("error", "no handler")
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -270,10 +277,14 @@ class AgentAccessibilityService : AccessibilityService() {
     private fun handle(cmd: String, req: JSONObject): JSONObject {
         // Deterministic consent gate: privacy-bearing commands require an
         // APPROVED session (see requestConsent). Introspection (commands,
-        // capabilities, ping) and pure navigation (home/back) stay ungated.
+        // capabilities, ping), pure navigation (home/back), telemetry whose
+        // scoped permission grant IS the consent (health/location), and
+        // notifstatus (grant state only — no content) stay ungated.
+        // notiflist (message CONTENT) is privacy-peer to screen: gated.
         val gated = cmd !in setOf(
             "ping", "commands", "capabilities", "home", "back",
-            "notifications", "session", "status")
+            "notifications", "session", "status",
+            "health", "location", "notifstatus")
         if (gated) gate()?.let { return it }
 
         return when (cmd) {
@@ -285,6 +296,31 @@ class AgentAccessibilityService : AccessibilityService() {
                 .put("sessionDesc", consent?.desc)
                 .put("sessionExpiresAt", consent?.until)
                 .put("consentPromptShowing", consentPromptShowing)
+            // telemetry: permission-scoped reads (spec §4 — grant IS consent)
+            "health" -> when (req.optString("sub")) {
+                "status" -> ok().put("health", HealthReader.status(applicationContext))
+                "hr" -> HealthReader.heartRate(applicationContext)
+                "steps" -> HealthReader.steps(applicationContext, req.optLong("hours", 24L))
+                "sleep" -> HealthReader.sleep(applicationContext, req.optLong("days", 2L))
+                else -> err().put("error", "usage: health status|hr|steps|sleep")
+            }
+            "location" -> LocationReader.read(applicationContext)
+            "hcrequest" -> {
+                // Start the HC permission request from the app process (the
+                // a11y service IS the app uid — only in-process starts of the
+                // non-exported activity pass the uid check; shell/am cannot).
+                runCatching {
+                    val i = android.content.Intent(this, MainActivity::class.java)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra("AUTO_HC_REQUEST", true)
+                    startActivity(i)
+                    ok().put("launched", true)
+                }.fold({ it }, { err().put("error", "launch failed: ${it.message}") })
+            }
+            "notifstatus" -> ok()
+                .put("granted", AgentNotificationListener.granted(applicationContext))
+                .put("snapshotCount", AgentNotificationListener.current().optInt("count", 0))
+            "notiflist" -> AgentNotificationListener.current()
         "tap" -> gestureTap(req.getDouble("x"), req.getDouble("y"), req.optDouble("duration", 50.0))
         "longPress" -> gestureTap(req.getDouble("x"), req.getDouble("y"), 800.0)
         "swipe" -> gestureSwipe(
@@ -463,6 +499,12 @@ class AgentAccessibilityService : AccessibilityService() {
         add("launch", "uri", "open ACTION_VIEW intent", "works where shell am start is OEM-blocked")
         add("session", "\"desc\" [seconds]", "request user consent overlay — REQUIRED before any read/click/type/launch; blocks up to 120s waiting for Approve/Deny")
         add("status", "", "current session state (active, expiry, pending prompt)")
+        add("health", "status|hr|steps [hours]|sleep [days]|skin", "health telemetry — permission-scoped (Health Connect grant IS consent)",
+            "hr reads the newest synced sample (may lag the watch by minutes); status shows grant state before first use")
+        add("location", "", "last-known fix {lat,lon,accuracyM,ageSec} or one current fetch",
+            "permission-scoped — location grant IS consent")
+        add("notifstatus", "", "notification-listener grant state + snapshot count (no content)")
+        add("notiflist", "", "active notifications (pkg/title/text)", "SESSION-GATED — message content is privacy-peer to screen")
         return ok().put("commands", cmds)
             .put("gesturesBlocked", gesturesBlocked)
             .put("consentGate", true)

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -26,11 +27,33 @@
          certificates are rejected), so a hijacked feed cannot install a
          different app. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Health Services (watch fallback) declares minSdk 30; safe to override:
+         its classes only load on WearOS (API 30+), never on sub-30 phones. -->
+    <uses-sdk tools:overrideLibrary="androidx.health.services.client"/>
+    <!-- Telemetry (Sep 28 spec, docs/telemetry-spec.md). Health: same permission
+         names serve Health Connect (phone) and Health Services (watch) paths —
+         WearOS 6 / Android 16 converge on android.permission.health.READ_*.
+         Location: fine+coarse pair required together on API 31+ even at
+         targetSdk 28. NotificationListener needs no permission element — its
+         grant is the user special-access toggle. -->
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <!-- Legacy path: WearOS Health Services gates MeasureClient on BODY_SENSORS
+         for apps targeting <=35 (compat shim routes the new health.* names only
+         on W6+ when the app ALSO declares this). Registration silently succeeds
+         without it but no samples are delivered — observed Sep 28. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_SLEEP" />
+    <uses-permission android:name="android.permission.health.READ_SKIN_TEMPERATURE" />
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:label="Letta Environment"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
+        android:largeHeap="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.DeviceDefault.DayNight">
 
@@ -41,6 +64,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Health Connect requires apps declaring health permissions to
+                 handle permission-usage viewing (the "see how this app uses
+                 your data" link from HC's UI). Without it, every read throws
+                 IllegalStateException: Incorrect health permission state. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
             </intent-filter>
         </activity>
 
@@ -60,6 +91,38 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/agent_accessibility_config" />
+        </service>
+
+        <!-- Health Connect onboarding route (A14+ framework module): the system
+             health UI resolves this alias to walk the user through per-type
+             grants. targetActivity is our launcher; the alias is permission-
+             gated so only the Health Connect module can start it. -->
+        <activity
+            android:name=".HCRequestActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity-alias
+            android:name="UAndAboveOnboardingActivity"
+            android:exported="true"
+            android:targetActivity=".MainActivity"
+            android:permission="android.permission.health.START_ONBOARDING">
+            <intent-filter>
+                <action android:name="android.health.connect.action.SHOW_ONBOARDING" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Notification snapshot for agentctl notiflist. Grant = user
+             special-access toggle (Notification access settings screen), not
+             a runtime dialog. Reads only package/title/text, drops our own. -->
+        <service
+            android:name=".AgentNotificationListener"
+            android:exported="false"
+            android:label="@string/notif_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <receiver

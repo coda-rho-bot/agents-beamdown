@@ -19,6 +19,12 @@
 #   agentctl launch <intent-uri>    (ACTION_VIEW — WORKS where shell am start is blocked)
 #   agentctl am <args...>           (passthrough to am; Samsung blocks some targets)
 #   agentctl notify "title" "text"  (app's own notification — always allowed)
+#   agentctl health status|hr|steps [hours]|sleep [days]
+#                                    (health telemetry; Health Connect grant IS consent —
+#                                     grant via app > Telemetry; hr = newest synced sample)
+#   agentctl location               (last-known/one-shot fix; location grant IS consent)
+#   agentctl notifstatus            (notification-listener grant state, no content)
+#   agentctl notiflist              (active notifications pkg/title/text — SESSION-GATED)
 #
 # CONSENT-GATED: screen/tree/click/text/launch need an approved session first:
 #   agentctl session "what you want to do" [seconds]   -> full-screen Approve/Deny overlay
@@ -51,6 +57,20 @@ case "${1:-help}" in
     status)    send '{"cmd":"status"}' ;;
     commands)  send '{"cmd":"commands"}' ;;
     capabilities) send '{"cmd":"capabilities"}' ;;
+    health)
+        SUB="${2:-status}"
+        case "$SUB" in
+            status) send '{"cmd":"health","sub":"status"}' ;;
+            hr)     send '{"cmd":"health","sub":"hr"}' ;;
+            steps)  send "{\"cmd\":\"health\",\"sub\":\"steps\",\"hours\":${3:-24}}" ;;
+            sleep)  send "{\"cmd\":\"health\",\"sub\":\"sleep\",\"days\":${3:-2}}" ;;
+            *)      echo '{"ok":false,"error":"usage: health status|hr|steps [hours]|sleep [days]"}' ;;
+        esac
+        ;;
+    location)   send '{"cmd":"location"}' ;;
+    hcrequest)  send '{"cmd":"hcrequest"}' ;;
+    notifstatus) send '{"cmd":"notifstatus"}' ;;
+    notiflist)  send '{"cmd":"notiflist"}' ;;
     session)
         SECS="${3:-300}"
         DESC=$(printf '%s' "$2" | sed 's/"/\\"/g')

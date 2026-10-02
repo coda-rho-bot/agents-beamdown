@@ -1,33 +1,38 @@
 #!/system/bin/sh
-# git — run git inside the Debian rootfs via proot.
+# git — spawnable git for letta-code MemFS sync (0.32.x+).
 #
-# Why: letta-code 0.32.x MemFS sync spawns `git` for every memory checkout.
-# Without a spawnable git on PATH every Bash/Skill/memory tool call dies with
-# "spawn git ENOENT". A direct loader-chain wrapper does NOT work for git:
-# git-remote-https is glibc and needs /etc/resolv.conf, /usr/lib/git-core
-# helpers, and the CA bundle at their compiled-in paths — proot maps all of
-# them from the rootfs.
+# PRIMARY PATH (Sep 28 2026): static ELF chain, no proot. The service installs
+#   files/bin/git-elf      — static bionic ELF (NDK API 35) exec'ing the rootfs
+#                            glibc loader with real git, --preload dnsport.so
+#   files/gc-shim/*        — static ELF shims (git, git-remote-{http,https,ftp,
+#                            ftps}) for git's dashed-dispatch child spawns
+#   files/libs/dnsport.so  — LD_PRELOAD getaddrinfo() override: raw A/AAAA via
+#                            direct syscalls to the local node DNS forwarder on
+#                            127.0.0.1:15353 (glibc-internal sendmmsg is NOT
+#                            interposable — no PLT; Android has no resolv.conf)
+#                            The forwarder (files/dns-forwarder.js) is started
+#                            by launch-server.sh via the APK node path.
+# proot CANNOT exec from loader-chain processes (its interpreter ENOENTs the
+# same way shebang scripts do), so the proot path below is only a fallback for
+# contexts that can run it. Sources: tools/watch-git-shims/ (gitmain.c,
+# gcshim.c, dnsport.c, dns-forwarder.js + README).
 #
-# Payload install (first run): the app stages git-arm64.tar.gz (git 2.39.5
-# from Debian bookworm + git-core + CA certs) and proot-aarch64.tar.gz to the
-# filesDir root — this wrapper extracts them into the rootfs/plugins. Fully
-# offline: no download unless the staged tarballs are missing (then falls
-# back to the plugins-v1 release URLs, same as dx).
-#
-# Bind layout: cwd is mapped to /host (git sees the caller's working
-# directory, which for the harness is under files/rootfs/root/... — the same
-# tree proot -R serves, so relative paths resolve identically). GIT_* env
-# (author identity, protocol v2) flows through — proot forwards the
-# environment. GIT_EXEC_PATH stays unset so git uses its compiled-in
-# /usr/lib/git-core inside the guest.
+# FALLBACK PATH: run git inside the Debian rootfs via proot (payload install on
+# first run, cwd mapped to /host, GIT_* env forwarded).
 #
 # Source of truth: app/src/main/assets/git.sh — the service copies this to
-# files/bin/git on every start. tools/on-device/git.sh mirrors it for
-# on-device debugging. Keep the three in sync.
+# files/bin/git on every start. tools/on-device/git.sh mirrors it. Keep in sync.
 
 set -u
 
 DX_FILES="${DX_FILES:-/data/user/0/com.angussoftware.letta.env/files}"
+
+# --- primary: static ELF chain -------------------------------------------------
+if [ -x "$DX_FILES/bin/git-elf" ] && [ -x "$DX_FILES/gc-shim/git-remote-https" ]; then
+    exec "$DX_FILES/bin/git-elf" "$@"
+fi
+
+# --- fallback: proot rootfs ----------------------------------------------------
 ROOTFS="$DX_FILES/rootfs"
 PLUGINS="$DX_FILES/plugins"
 PROOT="$PLUGINS/proot-aarch64/bin/proot"

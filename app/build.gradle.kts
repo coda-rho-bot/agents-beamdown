@@ -57,7 +57,7 @@ android {
     // bloats the APK and slows the one-shot staging copy. Same treatment
     // rootfs.tar relies on (uncompressed .tar).
     androidResources {
-        noCompress += listOf("tar", "gz")
+        noCompress += listOf("tar", "gz", "git-elf", "so")
     }
 
     lint {
@@ -90,4 +90,23 @@ dependencies {
     // method throws "not mocked") — the real implementation is test-only;
     // on-device the framework provides it.
     testImplementation("org.json:json:20240303")
+
+    // ComponentActivity + activity-result API for the Health Connect
+    // permission request contract (HCRequestActivity).
+    implementation("androidx.activity:activity-ktx:1.10.1")
+    // Telemetry (docs/telemetry-spec.md): HC client for the phone path (A14+
+    // framework module, no provider install needed); Health Services for the
+    // watch path (WearOS has no Health Connect — Samsung FAQ). Both are
+    // read-only usage. minSdk 26 is the HC SDK floor; health-services runs
+    // only on WearOS (no-op classes elsewhere).
+    // Health Services (watch path) minSdk 30 — the app keeps minSdk 26 for the
+    // legacy-storage path; the watch-fallback classes are only exercised on
+    // WearOS (API 30+), so overrideLibrary is safe on phones below 30 (never
+    // loads) and correct on the watch. Phone path (Health Connect, minSdk 26)
+    // is unaffected.
+    implementation("androidx.health.connect:connect-client:1.1.0")
+    implementation("androidx.health:health-services-client:1.1.0")
+    // compile-scope stub for ListenableFuture signatures in health-services
+    // (the AAR pulls guava at RUNTIME only; compile needs the interface).
+    implementation("com.google.guava:guava:32.0.1-android")
 }

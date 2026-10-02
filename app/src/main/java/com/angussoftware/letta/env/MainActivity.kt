@@ -14,9 +14,11 @@ import android.os.Looper
 import android.os.PowerManager
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -24,7 +26,29 @@ import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 
-class MainActivity : android.app.Activity() {
+class MainActivity : androidx.activity.ComponentActivity() {
+    // ComponentActivity (Sep 28): hosts the Health Connect permission
+    // REQUEST contract directly — intermediate translucent activities
+    // freeze at contract-launch (observed live: white screen + Samsung
+    // "not responding" surface, no system am_anr event).
+
+    private var hcAutoRequested = false
+    private val hcRequest = registerForActivityResult(
+        androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()
+    ) { /* result lands as grants; the 2s tick refreshes the row */ }
+
+    private fun hcRequestLaunch() {
+        runCatching {
+            hcRequest.launch(setOf(
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.HeartRateRecord::class),
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.StepsRecord::class),
+                androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                    androidx.health.connect.client.records.SleepSessionRecord::class)))
+        }
+    }
+
 
     companion object {
         // Single source: LettaEnvironmentService.PREFS etc.
@@ -68,12 +92,22 @@ class MainActivity : android.app.Activity() {
     private lateinit var envLine: TextView
     private var a11yDotView: TextView? = null
     private var a11yTextView: TextView? = null
-    private lateinit var batteryBanner: LinearLayout
+    // Telemetry card rows (2s tick live-updates grant states).
+    private var healthBtnView: Button? = null
+    private var healthGrantCount = 0
+    private var healthGrantCheckedAt = 0L
+    private var healthTextView: TextView? = null
+    private var locationTextView: TextView? = null
+    private var notifTextView: TextView? = null
+    // Nullable: the watch layout has no battery banner (WearOS has no
+    // exemption path — ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is
+    // ignored) and no collapsible log (log tail is always visible).
+    private var batteryBanner: LinearLayout? = null
     private lateinit var batteryBannerText: TextView
-    private lateinit var logCard: LinearLayout
-    private lateinit var logHeader: LinearLayout
-    private lateinit var logChevron: TextView
-    private lateinit var logScroll: ScrollView
+    private var logCard: LinearLayout? = null
+    private var logHeader: LinearLayout? = null
+    private var logChevron: TextView? = null
+    private var logScroll: ScrollView? = null
     private lateinit var logView: TextView
     private var logExpanded = false
     // Self-updater (v0.4.0): update card views — nullable because the card
@@ -98,11 +132,18 @@ class MainActivity : android.app.Activity() {
         UpdateManager.onAppStart(this)
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
-            showOnboarding()
+            if (isWatch()) showOnboardingWatch() else showOnboarding()
         } else {
-            showMain()
+            // Service start deferred to onResume (foreground) — starting the
+            // FGS from onCreate crashes on One UI pre-resume (Sep 26).
+            if (isWatch()) showMainWatch() else showMain()
         }
     }
+
+    /** Watch detection: PackageManager feature flag — no build flavor needed,
+     *  one APK adapts at runtime (phone and watch share this codebase). */
+    private fun isWatch(): Boolean =
+        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WATCH)
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -139,13 +180,20 @@ class MainActivity : android.app.Activity() {
         val keyLabel = TextView(this).apply {
             text = "API key"; textSize = 12f; setTextColor(C.textSecondary)
         }
+        val savedKey = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "")
         val keyField = EditText(this).apply {
-            hint = "sk-let-…"
+            // Pre-fill saved key (masked) on re-key so the user can change
+            // ONLY the env name without re-entering the key (watch parity).
+            hint = if (savedKey.isNullOrBlank()) "sk-let-…" else "API key — saved"
+            setText(savedKey ?: "")
             setHintTextColor(C.textSecondary)
             setTextColor(C.textPrimary)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSingleLine()
+            // Deterministic mask: setSingleLine() after inputType can clobber
+            // the password variation — transformationMethod survives ordering.
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
         }
         val envLabel = TextView(this).apply {
             text = "Environment name"; textSize = 12f; setTextColor(C.textSecondary)
@@ -161,27 +209,8 @@ class MainActivity : android.app.Activity() {
         val saveBtn = Button(this).apply {
             text = "Save & Start"
             setOnClickListener {
-                val key = keyField.text.toString().trim()
-                val env = envField.text.toString().trim().ifEmpty { DEFAULT_ENV }
-                if (!KEY_REGEX.matches(key)) {
-                    Toast.makeText(this@MainActivity, "Key must look like sk-let-… (letters/digits/dashes, 20+ chars)", Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
-                }
-                if (!ENV_REGEX.matches(env)) {
-                    Toast.makeText(this@MainActivity, "Environment name: lowercase letters, digits, - and _ only (max 64 chars)", Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
-                }
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString(PREF_KEY, key)
-                    .putString(PREF_ENV, env)
-                    .apply()
-                // Re-key/rename with a live server: stop it FIRST so the new
-                // config actually takes effect (old flow left the old-key
-                // server running — review task_92 #1 / task_93 #3).
-                stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java))
-                ensureRuntimePermissions()
-                showMain()
-                startEnvironment()
+                saveOnboarding(keyField.text.toString().trim(),
+                    envField.text.toString().trim().ifEmpty { DEFAULT_ENV })
             }
         }
         fieldCard.addView(keyLabel); fieldCard.addView(keyField)
@@ -193,6 +222,356 @@ class MainActivity : android.app.Activity() {
         val spacer = View(this)
         root.addView(spacer, LinearLayout.LayoutParams(1, dp(24)))
         setContentView(root)
+    }
+
+    // ---- watch UI (WearOS) ----------------------------------------------------
+    // WearOS design principles — deliberately NOT a shrunk phone layout:
+    //   • ONE vertical, bezel-scrollable view (canonical WearOS pattern).
+    //     Horizontal swipes are system-owned (left-swipe = back), so no pager.
+    //   • Flat black (AMOLED), no cards/outlines — watch UIs are chromeless.
+    //   • includeFontPadding=false everywhere: Android's default font padding
+    //     adds uneven air that reads as "rough" spacing at watch scale.
+    //   • Real drawn shapes (GradientDrawable), not unicode glyphs.
+    //   • Pill buttons via TextViews (no Material chrome), ripple feedback,
+    //     52dp targets, clear visual hierarchy: filled = primary, tonal = rest.
+    private var watchA11yBtn: Button? = null
+    private var watchScroll: ScrollView? = null
+    private var watchDot: View? = null
+    private var watchA11yPill: TextView? = null
+    private var watchLogHeader: TextView? = null
+    private var watchLogView: TextView? = null
+
+    // Watch palette (AMOLED): explicit, not adapted from phone light/dark.
+    private object W {
+        const val bg = Color.BLACK
+        const val text = 0xFFF2F5FA.toInt()        // primary text
+        const val textDim = 0xFF8B93A1.toInt()     // secondary text
+        const val textFaint = 0xFF5A6170.toInt()   // tertiary / headers
+        const val accent = 0xFF38BDF8.toInt()      // sky
+        const val accentFill = 0xFF0EA5E9.toInt()  // filled pill bg
+        const val pillNeutral = 0xFF1C2028.toInt() // tonal pill bg
+        const val danger = 0xFFF87171.toInt()
+        const val dangerFill = 0xFF2A1215.toInt()
+    }
+
+    /**
+     * Round-screen safe area: the usable region of a circle is the inscribed
+     * square — (w - w/√2)/2 ≈ 14.6% of screen width of padding on ALL FOUR
+     * sides (BoxInsetLayout formula). Side-only padding lets corners clip.
+     */
+    private fun applyWatchSafeArea(page: View, baseSides: Int, baseTop: Int, baseBottom: Int) {
+        page.setOnApplyWindowInsetsListener { v, insets ->
+            val w = resources.displayMetrics.widthPixels
+            val round = if (android.os.Build.VERSION.SDK_INT >= 30) insets.isRound else false
+            val inset = if (round) (w * 0.146).toInt() else dp(6)
+            v.setPadding(inset + baseSides, inset + baseTop, inset + baseSides, inset + baseBottom)
+            insets
+        }
+    }
+
+    /** Tight watch text: no font padding, centered. */
+    private fun watchText(
+        text: String, size: Float, color: Int,
+        bold: Boolean = false, mono: Boolean = false
+    ): TextView = TextView(this).apply {
+        this.text = text
+        textSize = size
+        setTextColor(color)
+        gravity = Gravity.CENTER
+        includeFontPadding = false
+        if (bold) typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        if (mono) typeface = Typeface.MONOSPACE
+    }
+
+    /** Drawn circle for status (no unicode dots). */
+    private fun watchDotView(sizeDp: Int, color: Int): View =
+        View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(color)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        }
+
+    /**
+     * Watch pill button: TextView with pill background, no Material chrome,
+     * ripple touch feedback. Styles: filled (primary action, accent bg, dark
+     * text), tonal (neutral surface), danger (red tint).
+     */
+    private fun watchPill(
+        label: String, style: Int = 0, onClick: (TextView) -> Unit
+    ): TextView = TextView(this).apply {
+        text = label
+        textSize = 15f
+        includeFontPadding = false
+        gravity = Gravity.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        minHeight = dp(52)
+        val (bg, fg) = when (style) {
+            1 -> W.accentFill to Color.BLACK          // filled primary
+            2 -> W.dangerFill to W.danger             // danger tonal
+            else -> W.pillNeutral to W.text           // neutral tonal
+        }
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(26).toFloat()
+            setColor(bg)
+        }
+        setTextColor(fg)
+        // ripple feedback (bounds-mode, on top of the pill)
+        foreground = android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x33FFFFFF.toInt()), null, null)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick(this) }
+    }
+
+    /** Small all-caps section header (letterspaced look via spacing char). */
+    private fun watchHeader(label: String): TextView =
+        watchText(label, 10.5f, W.textFaint, bold = true).apply {
+            letterSpacing = 0.15f
+            setPadding(0, 0, 0, 0)
+        }
+
+    /**
+     * Watch main: ONE vertical, bezel-scrollable view — the canonical WearOS
+     * pattern. Layout: status hero (top, centered), then all actions, then
+     * the log tail.
+     */
+    private fun showMainWatch() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(W.bg)
+        }
+
+        // ---- status hero: drawn dot, label, env, version — tight rhythm ----
+        watchDot = watchDotView(26, C.ok).also { dot ->
+            (dot.layoutParams as? LinearLayout.LayoutParams)?.apply {
+                topMargin = dp(10); bottomMargin = dp(10)
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
+            content.addView(dot)
+        }
+        statusLine = watchText("", 21f, W.text, bold = true)
+        envLine = watchText("", 12.5f, W.textDim).apply {
+            setPadding(0, dp(3), 0, 0)
+        }
+        versionLine = watchText("", 10.5f, W.textFaint).apply {
+            setPadding(0, dp(2), 0, 0)
+        }
+        content.addView(statusLine)
+        content.addView(envLine)
+        content.addView(versionLine)
+        // NOTE: no battery pill on watch — One UI Watch ships NO per-app
+        // battery controls (app details: Permissions/Version/Storage only,
+        // verified Sep 25 on Galaxy Watch 8), and ACTION_REQUEST_IGNORE_
+        // BATTERY_OPTIMIZATIONS doesn't resolve. The FGS (EXEMPTED bucket)
+        // is the actual protection; a pill would promise what doesn't exist.
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(22)))
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(22)))
+
+        // ---- actions ----
+        content.addView(watchHeader("ACTIONS"))
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+
+        val startPill = watchPill("Start", style = 1) {
+            ensureRuntimePermissions(); startEnvironment()
+        }
+        val stopPill = watchPill("Stop", style = 2) {
+            stopEnvironment()
+        }
+        val upgradePill = watchPill("Upgrade letta") {
+            // No AlertDialog on watch — direct action + Toast (the upgrade
+            // flow reports progress via the status line and notification).
+            ensureRuntimePermissions()
+            val intent = Intent(this, LettaEnvironmentService::class.java).apply {
+                action = LettaEnvironmentService.ACTION_UPGRADE
+            }
+            startForegroundService(intent)
+            Toast.makeText(this, "Upgrading — watch status", Toast.LENGTH_SHORT).show()
+        }
+        val rekeyPill = watchPill("Key / Name") { showOnboardingWatch() }
+        val a11yPill = watchPill("Ally control") {
+            if (isA11yEnabled()) {
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+            } else {
+                startA11yGuide()
+            }
+        }
+        watchA11yPill = a11yPill
+        listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill).forEach { b ->
+            content.addView(b, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        }
+
+        // ---- log (collapsible: tap the big header row) ----
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        val logHeader = TextView(this).apply {
+            text = "Server log  ▾"
+            textSize = 14f
+            setTextColor(W.textDim)
+            includeFontPadding = false
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
+            minHeight = dp(52)
+            isClickable = true
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(26).toFloat()
+                setColor(W.pillNeutral)
+            }
+            foreground = android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x33FFFFFF.toInt()), null, null)
+            setOnClickListener { toggleWatchLog() }
+        }
+        watchLogHeader = logHeader
+        content.addView(logHeader, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        logView = watchText("", 10.5f, W.textDim, mono = true).apply {
+            gravity = Gravity.START
+        }
+        watchLogView = logView
+        content.addView(logView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        logExpanded = true
+
+        val scroll = ScrollView(this).apply {
+            addView(content)
+            setBackgroundColor(W.bg)
+        }
+        watchScroll = scroll
+        applyWatchSafeArea(scroll, dp(8), 0, dp(2))
+        setContentView(scroll)
+    }
+
+    /** Expand/collapse the watch log section (tap the big header pill). */
+    private fun toggleWatchLog() {
+        logExpanded = !logExpanded
+        watchLogHeader?.text = if (logExpanded) "Server log  ▾" else "Server log  ▸"
+        watchLogView?.visibility = if (logExpanded) View.VISIBLE else View.GONE
+    }
+
+    /** Rotary bezel: scroll the vertical view (WearOS-native direction). */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (watchScroll != null &&
+            (event.source and android.view.InputDevice.SOURCE_ROTARY_ENCODER) != 0) {
+            val delta = event.getAxisValue(MotionEvent.AXIS_SCROLL)
+            watchScroll?.smoothScrollBy(0, (dp(60) * delta).toInt())
+            return true
+        }
+        return super.onGenericMotionEvent(event)
+    }
+
+    /** Watch onboarding: key + env entry, flat black, round-safe, cancellable. */
+    private fun showOnboardingWatch() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(W.bg)
+        }
+        content.addView(watchText("Letta", 20f, W.text, bold = true))
+        content.addView(watchText("Connect this watch as an environment.", 11.5f, W.textDim).apply {
+            setPadding(0, dp(4), 0, dp(10))
+        })
+        val savedKey = prefs.getString(PREF_KEY, "")
+        val keyField = EditText(this).apply {
+            // Pre-fill the saved key (masked) on re-key so the user can
+            // change ONLY the env name without re-entering the key.
+            hint = if (savedKey.isNullOrBlank()) "API key (sk-let-…)" else "API key — saved"
+            setText(savedKey ?: "")
+            setHintTextColor(W.textFaint)
+            setTextColor(W.text)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine()
+            // Deterministic mask — setSingleLine() can clobber the password
+            // variation from inputType; this survives ordering (watch field).
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+            textSize = 13f
+            includeFontPadding = false
+            minHeight = dp(44)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(W.pillNeutral)
+            }
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        val envField = EditText(this).apply {
+            hint = "env name"
+            setHintTextColor(W.textFaint)
+            setTextColor(W.text)
+            setSingleLine()
+            textSize = 13f
+            includeFontPadding = false
+            minHeight = dp(44)
+            setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(W.pillNeutral)
+            }
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        content.addView(keyField, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        content.addView(envField, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(14)))
+        content.addView(watchPill("Save & Start", style = 1) {
+            saveOnboarding(keyField.text.toString().trim(),
+                envField.text.toString().trim().ifEmpty { DEFAULT_ENV })
+        })
+        content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        // Cancel: only meaningful when re-keying (a key exists); otherwise no
+        // main screen to go back to — hide it on first-run onboarding.
+        if (!savedKey.isNullOrBlank()) {
+            content.addView(watchPill("Cancel") { showMainWatch() })
+        }
+        val scroll = ScrollView(this).apply {
+            addView(content)
+            setBackgroundColor(W.bg)
+        }
+        applyWatchSafeArea(scroll, dp(4), dp(6), dp(4))
+        setContentView(scroll)
+    }
+
+    /** Shared onboarding save+start (used by phone and watch variants). */
+    private fun saveOnboarding(key: String, env: String) {
+        // If the user left the key field empty but a saved key exists, they
+        // are renaming only — keep the existing key. (The field pre-fills the
+        // saved key, so empty means explicitly cleared; either way the saved
+        // key is the safe default for a name-only change.)
+        val effectiveKey = key.ifBlank {
+            getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "") ?: ""
+        }
+        if (!KEY_REGEX.matches(effectiveKey)) {
+            Toast.makeText(this, "Key must look like sk-let-… (letters/digits/dashes, 20+ chars)", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!ENV_REGEX.matches(env)) {
+            Toast.makeText(this, "Environment name: lowercase letters, digits, - and _ only (max 64 chars)", Toast.LENGTH_LONG).show()
+            return
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(PREF_KEY, effectiveKey)
+            .putString(PREF_ENV, env)
+            .apply()
+        // Re-key/rename with a live server: stop it FIRST so the new
+        // config actually takes effect (old flow left the old-key
+        // server running — review task_92 #1 / task_93 #3).
+        stopEnvironment()
+        ensureRuntimePermissions()
+        // Config change = definite restart: clear any user-stop marker so
+        // the launch below isn't filtered by the sticky-stop guard.
+        runCatching { File(filesDir, ".user-stopped").delete() }
+        if (isWatch()) showMainWatch() else showMain()
+        startEnvironment()
     }
 
     private fun showMain() {
@@ -281,7 +660,7 @@ class MainActivity : android.app.Activity() {
             textSize = 13f
             setTextColor(Color.WHITE)
         }
-        batteryBanner.addView(batteryBannerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        batteryBanner?.addView(batteryBannerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(batteryBanner)
 
         // ---- actions: two compact rows in one card ----
@@ -307,7 +686,7 @@ class MainActivity : android.app.Activity() {
             }
         }
         val stopBtn = actionButton("Stop", danger = true).apply {
-            setOnClickListener { stopService(Intent(this@MainActivity, LettaEnvironmentService::class.java)) }
+            setOnClickListener { stopEnvironment() }
         }
         row1.addView(startBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         row1.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
@@ -396,7 +775,102 @@ class MainActivity : android.app.Activity() {
         a11yCard.addView(a11yHeader)
         root.addView(a11yCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
-        root.addView(actionCard)
+
+        // ---- telemetry card (health/location/notifications grant states) ----
+        // One card, three rows, each showing live grant state + the exact next
+        // action (spec §4: one place, never silent). Re-evaluated on the 2s tick.
+        val teleCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+        }
+        teleCard.addView(TextView(this).apply {
+            text = "T E L E M E T R Y"
+            textSize = 12f
+            setTextColor(C.textSecondary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(6))
+        })
+        // Health row: HC SDK availability + granted count.
+        healthTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        healthBtnView = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                // targetSdk 28: the permission controller silently refuses the
+                // HC dialog (16ms auto-dismiss, traced Sep 28) — grants come
+                // via pm grant. The contract launch is kept ONLY because it
+                // registers the app with HC (required once); if grants are
+                // already in place this button shows state instead.
+                if (healthGrantCount > 0) {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Health access already granted")
+                        .setMessage("$healthGrantCount read permission(s) active. " +
+                            "Manage them in Settings > Apps > Health Connect > App permissions.")
+                        .setPositiveButton("Open HC settings") { _, _ ->
+                            runCatching {
+                                startActivity(android.content.Intent("android.health.connect.action.HEALTH_HOME_SETTINGS"))
+                            }
+                        }
+                        .setNegativeButton("Close", null)
+                        .show()
+                } else {
+                    hcRequest.launch(setOf(
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.HeartRateRecord::class),
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.StepsRecord::class),
+                        androidx.health.connect.client.permission.HealthPermission.getReadPermission(
+                            androidx.health.connect.client.records.SleepSessionRecord::class)))
+                }
+            }
+        }
+        val healthRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        healthRow.addView(healthTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        healthRow.addView(healthBtnView!!)
+        teleCard.addView(healthRow)
+        // Location row.
+        locationTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        val locationBtn = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                requestPermissions(arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION), 2)
+            }
+        }
+        val locationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        locationRow.addView(locationTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        locationRow.addView(locationBtn)
+        teleCard.addView(locationRow)
+        // Notifications row: special-access toggle, poll the Secure setting.
+        notifTextView = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C.textPrimary)
+        }
+        val notifBtn = Button(this).apply {
+            text = "Grant"
+            textSize = 12f
+            setOnClickListener {
+                runCatching {
+                    startActivity(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS.let {
+                        android.content.Intent(it)
+                    })
+                }
+            }
+        }
+        val notifRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        notifRow.addView(notifTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        notifRow.addView(notifBtn)
+        teleCard.addView(notifRow)
+        root.addView(teleCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- self-updater: update card (IDLE only — queued while running) ----
@@ -514,9 +988,9 @@ class MainActivity : android.app.Activity() {
             textSize = 16f
             setTextColor(C.textSecondary)
         }
-        logHeader.addView(logTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        logHeader.addView(logChevron)
-        logCard.addView(logHeader)
+        logHeader?.addView(logTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        logHeader?.addView(logChevron)
+        logCard?.addView(logHeader)
 
         logView = TextView(this).apply {
             textSize = 12f
@@ -529,7 +1003,7 @@ class MainActivity : android.app.Activity() {
             addView(hScroll)
             visibility = View.GONE
         }
-        logCard.addView(logScroll, LinearLayout.LayoutParams(
+        logCard?.addView(logScroll, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(220)))
         root.addView(logCard, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
@@ -543,8 +1017,8 @@ class MainActivity : android.app.Activity() {
 
     private fun toggleLog() {
         logExpanded = !logExpanded
-        logScroll.visibility = if (logExpanded) View.VISIBLE else View.GONE
-        logChevron.text = if (logExpanded) "▾" else "▸"
+        logScroll?.visibility = if (logExpanded) View.VISIBLE else View.GONE
+        logChevron?.text = if (logExpanded) "▾" else "▸"
     }
 
     /**
@@ -602,8 +1076,9 @@ class MainActivity : android.app.Activity() {
             "The agent can now see the screen, tap, swipe, and type. " +
             "Revoke any time: Settings → Accessibility → Letta Environment Agent.")
         Toast.makeText(this, "Phone control enabled ✓", Toast.LENGTH_LONG).show()
-        // Re-render the card state (showMain rebuild is cheap)
-        runCatching { showMain() }
+        // Re-render the card state (rebuild is cheap) — WATCH-aware: the old
+        // unconditional showMain() put the PHONE layout on a watch screen.
+        runCatching { if (isWatch()) showMainWatch() else showMain() }
     }
 
     private fun postGuideNotification(title: String, text: String) {
@@ -657,23 +1132,28 @@ class MainActivity : android.app.Activity() {
         fetchLatestVersion()
         val installed = installedVersion()
         val latest = latestVersion
+        // Watch: faint base + bright state colors (phone palette is
+        // light-mode-adapted — invisible/muddy on the watch's black bg).
+        val base = if (isWatch()) W.textFaint else C.textSecondary
+        val warn = if (isWatch()) 0xFFFBBF24.toInt() else C.warn
+        val ok = if (isWatch()) 0xFF4ADE80.toInt() else C.ok
         versionLine.apply {
             when {
                 installed == "unknown" -> {
                     text = "letta-code: not installed"
-                    setTextColor(C.textSecondary)
+                    setTextColor(base)
                 }
                 latest == null -> {
                     text = "letta-code $installed"
-                    setTextColor(C.textSecondary)
+                    setTextColor(base)
                 }
                 latest != installed -> {
                     text = "letta-code $installed — $latest available"
-                    setTextColor(C.warn)
+                    setTextColor(warn)
                 }
                 else -> {
                     text = "letta-code $installed (up to date)"
-                    setTextColor(C.ok)
+                    setTextColor(ok)
                 }
             }
         }
@@ -731,14 +1211,49 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    /** Explicit user Start (button / save) — clears any user-stop marker. */
     private fun startEnvironment() {
+        startForegroundService(Intent(this, LettaEnvironmentService::class.java).apply {
+            action = LettaEnvironmentService.ACTION_START_EXPLICIT
+        })
+    }
+
+    /** App-open ensure-start: does NOT clear the user-stop marker — opening
+     *  the app after an explicit Stop must not resurrect the server, while
+     *  post-install relaunches and idle-kill recovery still bring it up. */
+    private fun ensureEnvironment() {
         startForegroundService(Intent(this, LettaEnvironmentService::class.java))
+    }
+
+    /** Explicit user Stop — sticky across app re-opens (marker set by the
+     *  service; cleared by Start button or config change). */
+    private fun stopEnvironment() {
+        startForegroundService(Intent(this, LettaEnvironmentService::class.java).apply {
+            action = LettaEnvironmentService.ACTION_STOP_EXPLICIT
+        })
     }
 
     override fun onResume() {
         super.onResume()
         handler.post(refresh)
+        // Autostart (once per process): MUST run from a resumed/foreground
+        // activity — starting the FGS from onCreate (pre-resume) makes the
+        // service's startForeground throw SecurityException on One UI
+        // (crash-looped the phone app at every launch, Sep 26).
+        // agentctl hcrequest path: launch the HC permission request once the
+        // activity is resumed (contract needs a RESUMED activity).
+        if (intent?.getBooleanExtra("AUTO_HC_REQUEST", false) == true && !hcAutoRequested) {
+            hcAutoRequested = true
+            hcRequestLaunch()
+        }
+        if (!autostartDone) {
+            autostartDone = true
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            if (!prefs.getString(PREF_KEY, "").isNullOrBlank()) ensureEnvironment()
+        }
     }
+
+    private var autostartDone = false
 
     override fun onPause() {
         super.onPause()
@@ -768,6 +1283,15 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    /** Watch state colors: bright variants for black AMOLED — the phone
+     *  palette (C) adapts to light mode and would be invisible on black. */
+    private fun watchStateColor(c: Int): Int = when (c) {
+        C.ok -> 0xFF4ADE80.toInt()
+        C.warn -> 0xFFFBBF24.toInt()
+        C.error -> 0xFFF87171.toInt()
+        else -> W.text
+    }
+
     private fun renderStatus() {
         if (!::statusLine.isInitialized) return // onboarding path never builds these views
         runCatching {
@@ -777,17 +1301,39 @@ class MainActivity : android.app.Activity() {
             val logFile = File(filesDir, "server.log")
             val rawStatus = if (statusFile.exists()) statusFile.readText() else ""
             val (color, label) = stateOf(rawStatus)
-            statusDot.setTextColor(color)
-            statusLine.text = label
-            statusLine.setTextColor(color)
+            // Watch layout: statusDot is never assigned (watchDot replaces it)
+            // — touching it throws lateinit, runCatching eats the rest of the
+            // tick, and NOTHING renders. Guard by layout mode.
+            if (isWatch()) {
+                statusLine.text = label
+                statusLine.setTextColor(watchStateColor(stateOf(rawStatus).first))
+                watchDot?.let { dot ->
+                    (dot.background as? GradientDrawable)?.setColor(watchStateColor(color))
+                }
+            } else {
+                statusDot.setTextColor(color)
+                statusLine.text = label
+                statusLine.setTextColor(color)
+            }
             envLine.text = env
-            (statusLine.parent as? LinearLayout)?.getChildAt(1)?.let { v ->
+            // Phone key line is found by TAG ( getChildAt(1) was ambiguous —
+            // on the watch layout child 1 is statusLine, so the 2s tick
+            // overwrote "Online" with the masked key ).
+            ((statusLine.parent as? android.view.ViewGroup)?.findViewWithTag<TextView>("keyline"))?.let { v ->
                 (v as? TextView)?.text = "key: ${maskKey(prefs.getString(PREF_KEY, ""))}"
             }
+            // Watch hero dot (drawn circle, recolored by state)
+            watchDot?.let { dot ->
+                (dot.background as? GradientDrawable)?.setColor(color)
+            }
+            // Watch version line color: keep faint (renderVersionLine may
+            // recolor for upgrade prompts on phone; watch stays neutral)
             renderVersionLine()
             renderUpdateCard()
             // Battery banner: re-evaluated each tick; clears itself when granted.
-            // Phone-control card: live state each tick (grant/revoke reflects in 2s)
+            // Phone-control card: live state each tick (grant/revoke reflects in 2s).
+            // Watch layout has neither (nulls) — WearOS ignores the exemption
+            // path entirely; the fix is the phone-side Galaxy Wearable grant.
             a11yDotView?.setTextColor(if (isA11yEnabled()) C.ok else C.warn)
             val a11yOn = isA11yEnabled()
             a11yTextView?.apply {
@@ -795,24 +1341,94 @@ class MainActivity : android.app.Activity() {
                        else "Phone control: OFF"
                 setTextColor(if (a11yOn) C.ok else C.textPrimary)
             }
+            // Telemetry rows: live grant states (HC status is cheap; cache per tick)
+            healthTextView?.let { tv ->
+                // NEVER block main: getGrantedPermissions is a binder round-trip.
+                // On-tick we show only SDK availability + the last known grant
+                // count (refreshed opportunistically off-main below). This
+                // fixed an ANR (runBlocking on main in the 2s tick, Sep 28).
+                val sdk = androidx.health.connect.client.HealthConnectClient
+                    .getSdkStatus(this) == androidx.health.connect.client.HealthConnectClient.SDK_AVAILABLE
+                if (!sdk) {
+                    tv.text = "Health: not available on this device"
+                    tv.setTextColor(C.textSecondary)
+                } else {
+                    tv.text = if (healthGrantCount > 0) "Health: granted — telemetry live"
+                              else "Health: $healthGrantCount read grants active"
+                    tv.setTextColor(if (healthGrantCount > 0) C.ok else C.textSecondary)
+                    healthBtnView?.let { b ->
+                        b.text = if (healthGrantCount > 0) "✓" else "Grant"
+                        b.isEnabled = true // always tappable: shows state dialog when granted
+                    }
+                    if (System.currentTimeMillis() - healthGrantCheckedAt > 5000) {
+                        healthGrantCheckedAt = System.currentTimeMillis()
+                        Thread {
+                            // Truth source: PackageManager grant state, NOT the
+                            // HC client — getOrCreate() caches permission
+                            // snapshots per instance, and a client created
+                            // before pm-grant returns stale empty grants
+                            // forever (UI showed 0 while the socket path, fresh
+                            // client, saw 3 — Sep 28). pm state is the actual
+                            // authority anyway.
+                            val pm = packageManager
+                            val n = listOf(
+                                "android.permission.health.READ_HEART_RATE",
+                                "android.permission.health.READ_STEPS",
+                                "android.permission.health.READ_SLEEP"
+                            ).count {
+                                runCatching {
+                                    pm.checkPermission(it, packageName) ==
+                                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                                }.getOrDefault(false)
+                            }
+                            healthGrantCount = n
+                        }.start()
+                    }
+                }
+            }
+            locationTextView?.let { tv ->
+                val on = LocationReader.granted(this)
+                tv.text = if (on) "Location: granted" else "Location: not granted"
+                tv.setTextColor(if (on) C.ok else C.textSecondary)
+            }
+            notifTextView?.let { tv ->
+                val on = AgentNotificationListener.granted(this)
+                tv.text = if (on) "Notifications: listener active"
+                          else "Notifications: listener off"
+                tv.setTextColor(if (on) C.ok else C.textSecondary)
+            }
+            // Watch Ally-control pill: live label (ON → opens settings; OFF → guide)
+            watchA11yPill?.apply { text = if (a11yOn) "Ally control · ON" else "Ally control · OFF" }
 
-            batteryBanner.visibility =
-                if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
-            // Review #19 N3: solid error-tinted bg in light mode (white text
-            // on 15%-alpha red was unreadable); translucent in dark.
-            (batteryBanner.background as? GradientDrawable)?.setColor(
-                if (isDark()) C.error.withAlpha(0x26) else C.error)
-            batteryBannerText.setTextColor(
-                if (isDark()) C.textPrimary else Color.WHITE)
+            // Watch layout has no battery banner (null) — WearOS ignores the
+            // exemption path entirely; the fix is the phone-side Wearable grant.
+            batteryBanner?.apply {
+                visibility =
+                    if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
+                // Review #19 N3: solid error-tinted bg in light mode (white text
+                // on 15%-alpha red was unreadable); translucent in dark.
+                (background as? GradientDrawable)?.setColor(
+                    if (isDark()) C.error.withAlpha(0x26) else C.error)
+                batteryBannerText.setTextColor(
+                    if (isDark()) C.textPrimary else Color.WHITE)
+            }
 
             if (logExpanded) {
                 val tail = if (logFile.exists()) {
                     // tail-read: cap to last 64KB to bound main-thread work
                     RandomAccessTail.tail(logFile, 64 * 1024)
                 } else ""
-                val atBottom = !logScroll.canScrollVertically(1)
-                logView.text = tail
-                if (atBottom) logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                // Phone: nested log scroll; watch: whole-view scroll. On the
+                // watch, DON'T auto-scroll to the log bottom — that would
+                // yank the user away from the status hero at the top.
+                val scroll = logScroll
+                if (scroll != null) {
+                    val atBottom = !scroll.canScrollVertically(1)
+                    logView.text = tail
+                    if (atBottom) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                } else {
+                    logView.text = tail
+                }
             }
         }
     }
