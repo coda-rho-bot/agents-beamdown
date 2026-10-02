@@ -1174,7 +1174,7 @@ class LettaEnvironmentService : Service() {
             "Environment Status",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Persistent notification shown while the Letta environment is running on this device"
+            description = "Persistent notification shown while the Agents Beamdown environment is running on this device"
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)

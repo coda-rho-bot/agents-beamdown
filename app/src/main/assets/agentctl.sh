@@ -28,7 +28,7 @@
 #
 # CONSENT-GATED: screen/tree/click/text/launch need an approved session first:
 #   agentctl session "what you want to do" [seconds]   -> full-screen Approve/Deny overlay
-# Requires: Settings > Accessibility > Letta Environment Agent = ON (a11y cmds).
+# Requires: Settings > Accessibility > Agents Beamdown Agent = ON (a11y cmds).
 # am/notify/keyevent work WITHOUT accessibility.
 
 set -u
