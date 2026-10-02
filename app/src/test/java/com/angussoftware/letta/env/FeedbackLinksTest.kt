@@ -13,7 +13,7 @@ class FeedbackLinksTest {
     @Test
     fun repoUrlPointsAtPublicMirror() {
         assertEquals(
-            "https://github.com/coda-rho-bot/letta-environment-android",
+            "https://github.com/coda-rho-bot/agents-beamdown",
             FeedbackLinks.REPO_URL
         )
     }
