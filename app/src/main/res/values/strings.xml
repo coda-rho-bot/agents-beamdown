@@ -2,6 +2,7 @@
 <resources>
     <string name="a11y_description">Lets the Letta environment agent operate this phone: read screen content, tap, swipe, and type on your behalf. Only you grant it, and you can revoke it any time in Settings > Accessibility.</string>
     <string name="a11y_label">Letta Environment Agent</string>
+    <string name="notif_listener_label">Letta Environment Notifications</string>
     <string name="a11y_explain_title">Enable phone control?</string>
     <string name="a11y_explain_body">WHAT THIS DOES\nThe agent gains the ability to use your phone like a person does: see what is on screen, tap buttons, swipe, and type text. It could, for example, read a QR code from an app, reply in a messaging app, or change a setting for you.\n\nWHAT IT DOES NOT DO\nIt cannot install apps, delete anything, or act while you have not asked. Nothing leaves your phone — screen content is processed locally.\n\nYOUR CONTROL\nYou grant it with one toggle. You can revoke it at any time (Settings > Accessibility). A persistent notification shows when the agent is using it.\n\nTo finish: Settings > Accessibility > Installed apps > Letta Environment Agent > On > Allow.</string>
 </resources>
