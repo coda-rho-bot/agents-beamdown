@@ -10,7 +10,7 @@ package com.angussoftware.letta.env
  * gracefully (plain new-issue form) when the template is absent.
  */
 object FeedbackLinks {
-    const val REPO_URL = "https://github.com/coda-rho-bot/letta-environment-android"
+    const val REPO_URL = "https://github.com/coda-rho-bot/agents-beamdown"
     const val ISSUE_LABEL = "bug"
     const val ISSUE_TEMPLATE = "bug_report.md"
 
