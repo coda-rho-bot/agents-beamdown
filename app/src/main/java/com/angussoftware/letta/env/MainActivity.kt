@@ -400,7 +400,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
         }
         watchA11yPill = a11yPill
-        listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill).forEach { b ->
+        // Feedback: public issue tracker (primary) + source mirror (secondary)
+        // — tonal pills, below the environment actions.
+        val reportPill = watchPill("Report an issue") {
+            openExternalUrl(FeedbackLinks.NEW_ISSUE_URL)
+        }
+        val sourcePill = watchPill("View source") {
+            openExternalUrl(FeedbackLinks.REPO_URL)
+        }
+        val kofiPill = watchPill("Support on Ko-fi") {
+            openExternalUrl(FeedbackLinks.KOFI_URL)
+        }
+        listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill,
+               reportPill, sourcePill, kofiPill).forEach { b ->
             content.addView(b, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
@@ -445,6 +457,25 @@ class MainActivity : androidx.activity.ComponentActivity() {
         watchScroll = scroll
         applyWatchSafeArea(scroll, dp(8), 0, dp(2))
         setContentView(scroll)
+    }
+
+    /**
+     * Open a URL in the browser (public feedback links — issue tracker and
+     * source mirror). runCatching: a URL that resolves to no browser must
+     * not crash the app; the catch path routes to the app details page so
+     * the user is not left on a dead tap.
+     */
+    private fun openExternalUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: Exception) {
+            runCatching {
+                startActivity(Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ))
+            }
+        }
     }
 
     /** Expand/collapse the watch log section (tap the big header pill). */
@@ -962,6 +993,48 @@ class MainActivity : androidx.activity.ComponentActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         settingsCard.addView(modeExplain)
         root.addView(settingsCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- feedback card (public issue tracker + source mirror) ----
+        // The GitHub mirror is the public tracker: one primary action
+        // (report an issue, pre-labeled bug) + a secondary source link.
+        // Same tinted-button treatment as the update/settings rows.
+        val feedbackCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(pad, dp(12), pad, dp(12))
+        }
+        val reportBtn = Button(this).apply {
+            text = "Report an issue"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.NEW_ISSUE_URL) }
+        }
+        val sourceBtn = Button(this).apply {
+            text = "View source"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.REPO_URL) }
+        }
+        val kofiBtn = Button(this).apply {
+            text = "Support on Ko-fi"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.KOFI_URL) }
+        }
+        feedbackCard.addView(reportBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        feedbackCard.addView(sourceBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        feedbackCard.addView(kofiBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(feedbackCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- collapsible log card ----
