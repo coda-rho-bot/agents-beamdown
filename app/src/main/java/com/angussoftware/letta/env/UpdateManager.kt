@@ -338,7 +338,7 @@ object UpdateManager {
         val url = p.getString(PREF_UPDATE_URL, null) ?: return false
         val tag = p.getString(PREF_UPDATE_TAG, null) ?: return false
         val req = DownloadManager.Request(Uri.parse(url))
-            .setTitle("Letta Environment $tag")
+            .setTitle("Agents Beamdown $tag")
             .setDescription("App update")
             .setDestinationInExternalFilesDir(app, null, "updates/letta-environment-$tag.apk")
         val id = (app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)

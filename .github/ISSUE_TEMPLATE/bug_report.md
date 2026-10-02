@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with the Letta Environment app
+about: Report a problem with the Agents Beamdown app
 labels: bug
 title: "[Bug] "
 assignees: ''

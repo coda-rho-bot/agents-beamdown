@@ -1226,7 +1226,7 @@ class LettaEnvironmentService : Service() {
             null
         }
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Letta Environment — ${envName()}")
+            .setContentTitle("Agents Beamdown — ${envName()}")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setLargeIcon(largeIcon)

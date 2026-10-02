@@ -25,7 +25,7 @@ object LocationReader {
 
     fun read(ctx: Context): JSONObject {
         if (!granted(ctx)) return JSONObject().put("ok", false)
-            .put("error", "location not granted — open the Letta Environment app > " +
+            .put("error", "location not granted — open the Agents Beamdown app > " +
                 "Telemetry and grant location access, then retry")
 
         val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager

@@ -161,7 +161,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setBackgroundColor(C.bg)
         }
         val title = TextView(this).apply {
-            text = "Letta Environment"
+            text = "Agents Beamdown"
             textSize = 26f
             setTextColor(C.textPrimary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -619,7 +619,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val title = TextView(this).apply {
-            text = "Letta Environment"
+            text = "Agents Beamdown"
             textSize = 20f
             setTextColor(C.textPrimary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -779,7 +779,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 val bodyRes = resources.getIdentifier("a11y_explain_body", "string", packageName)
                 val titleRes = resources.getIdentifier("a11y_explain_title", "string", packageName)
                 val body = if (bodyRes != 0) getString(bodyRes)
-                    else "Grant the Letta Environment Agent accessibility access so it can see the screen, tap, swipe, and type on your behalf. Revocable any time in Settings > Accessibility."
+                    else "Grant the Agents Beamdown Agent accessibility access so it can see the screen, tap, swipe, and type on your behalf. Revocable any time in Settings > Accessibility."
                 val title = if (titleRes != 0) getString(titleRes) else "Enable phone control?"
                 android.app.AlertDialog.Builder(this@MainActivity)
                     .setTitle(title)
@@ -1132,7 +1132,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         postGuideNotification(
             "1. Open Settings → Accessibility",
             "2. Tap \"Installed apps\" (or \"Downloaded apps\")\n" +
-            "3. Tap \"Letta Environment Agent\"\n" +
+            "3. Tap \"Agents Beamdown Agent\"\n" +
             "4. Toggle ON → \"Allow\"\n" +
             "\nThis notification updates itself — keep going!")
         handler.postDelayed(guideCheck, 1000)
@@ -1147,7 +1147,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         postGuideNotification(
             "Phone control enabled ✓",
             "The agent can now see the screen, tap, swipe, and type. " +
-            "Revoke any time: Settings → Accessibility → Letta Environment Agent.")
+            "Revoke any time: Settings → Accessibility → Agents Beamdown Agent.")
         Toast.makeText(this, "Phone control enabled ✓", Toast.LENGTH_LONG).show()
         // Re-render the card state (rebuild is cheap) — WATCH-aware: the old
         // unconditional showMain() put the PHONE layout on a watch screen.

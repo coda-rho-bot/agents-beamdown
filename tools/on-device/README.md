@@ -1,6 +1,6 @@
 # On-device tooling (proot plugin)
 
-Adds on-demand tool installation to the Letta Environment without growing the
+Adds on-demand tool installation to the Agents Beamdown without growing the
 APK. The agent downloads a ~125KB proot plugin at runtime and gains a
 chroot-like Debian userspace — from which `apt-get install git python3 …`
 works directly into the persistent rootfs.

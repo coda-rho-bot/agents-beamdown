@@ -297,7 +297,7 @@ object HealthReader {
             "watch fallback not yet implemented (docs/telemetry-spec.md)")
 
     private fun errPermission(name: String) = JSONObject().put("ok", false)
-        .put("error", "$name not granted — open the Letta Environment app > Telemetry " +
+        .put("error", "$name not granted — open the Agents Beamdown app > Telemetry " +
             "and grant health access, then retry")
 
     private fun cache(ctx: Context, data: JSONObject) {

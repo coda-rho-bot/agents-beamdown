@@ -1,7 +1,7 @@
 # Watch git HTTPS shims (Sep 27 2026)
 
 Full glibc git over HTTPS on the Galaxy Watch 7 (WearOS, API 36), inside the
-Letta Environment app sandbox. No root, no proot. Verified e2e: ls-remote,
+Agents Beamdown app sandbox. No root, no proot. Verified e2e: ls-remote,
 full clone, push --dry-run of fleet-shared against api.letta.com.
 
 ## Components

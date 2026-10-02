@@ -1,4 +1,4 @@
-# Letta Environment for Android
+# Agents Beamdown for Android
 
 Run a full [Letta Code](https://docs.letta.com) server on your Android phone as a
 **cloud execution environment** — agents on your Letta server can run tools, execute

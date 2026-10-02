@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest something for the Letta Environment app
+about: Suggest something for the Agents Beamdown app
 labels: enhancement
 title: "[Feature] "
 ---
