@@ -81,6 +81,17 @@ steps:
             sys.exit(1)
         size = os.path.getsize('app/src/main/assets/rootfs.tar')
         print(f'rootfs.tar downloaded: {size} bytes')
+        EXPECTED_SHA = '828cf96dca03c5481621f7c332638d7e0c3da47a0922f7711cd864d0f403b498'
+        import hashlib
+        h = hashlib.sha256()
+        with open('app/src/main/assets/rootfs.tar', 'rb') as f:
+            for chunk in iter(lambda: f.read(1 << 20), b''):
+                h.update(chunk)
+        actual = h.hexdigest()
+        if actual != EXPECTED_SHA:
+            print(f'FATAL: rootfs.tar sha256 mismatch: expected {EXPECTED_SHA}, got {actual}', file=sys.stderr)
+            sys.exit(1)
+        print(f'rootfs.tar sha256 verified: {actual[:16]}...')
         PYEOF
         python3 /tmp/fetch-rootfs.py
         ls -la app/src/main/assets/rootfs.tar

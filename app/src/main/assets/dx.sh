@@ -3,7 +3,7 @@
 # v3: -0 fake-root, TMPDIR=/tmp2 (stale-tmpfs shadow), /sdcard bind, libc6 hold.
 set -u
 DX_FILES="${DX_FILES:-/data/user/0/com.angussoftware.letta.env/files}"
-DX_PLUGIN_URL="${DX_PLUGIN_URL:-https://github.com/coda-rho-bot/letta-environment-android/releases/download/plugins-v1/proot-aarch64.tar.gz}"
+DX_PLUGIN_URL="${DX_PLUGIN_URL:-https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/proot-aarch64.tar.gz}"
 ROOTFS="$DX_FILES/rootfs"
 PLUGINS="$DX_FILES/plugins"
 PROOT="$PLUGINS/proot-aarch64/bin/proot"
@@ -25,7 +25,7 @@ fi
 L2C_DIR="$PLUGINS/link2copy"; L2C_SO="$L2C_DIR/liblink2copy.so"
 if [ ! -f "$L2C_SO" ]; then
     mkdir -p "$L2C_DIR" 2>/dev/null
-    /system/bin/curl -sSL --max-time 60 -o "$L2C_SO.tmp" "https://github.com/coda-rho-bot/letta-environment-android/releases/download/plugins-v1/liblink2copy.so" \
+    /system/bin/curl -sSL --max-time 60 -o "$L2C_SO.tmp" "https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/liblink2copy.so" \
         && mv "$L2C_SO.tmp" "$L2C_SO" || { rm -f "$L2C_SO.tmp"; echo "dx: link2copy shim unavailable — dpkg may fail" >&2; }
 fi
 L2C_PRELOAD=""
