@@ -85,6 +85,31 @@ class UpdateManagerTest {
         assertFalse(UpdateManager.isNewer("", "0.3.2"))
     }
 
+    // ---- constants (audit hardening) -----------------------------------------
+
+    @Test
+    fun feedUrlIsCanonicalAgentsBeamdownPathOverHttps() {
+        // Canonical (rebrand) path, HTTPS, JSON doc — the feed URL is a
+        // contract with the release pipeline's publish step; a typo here
+        // silently bricks every future update check.
+        assertEquals(
+            "https://dl.angussoftware.dev/agents-beamdown/latest.json",
+            UpdateManager.FEED_URL
+        )
+        assertTrue(UpdateManager.FEED_URL.startsWith("https://"))
+        assertTrue(UpdateManager.FEED_URL.endsWith(".json"))
+    }
+
+    @Test
+    fun userAgentPrefixIsNeutralNoDalvikFingerprint() {
+        // Audit fix 1: the UA must be app name + version — it must NOT
+        // leak the Dalvik device fingerprint (model/OS string). The prefix
+        // is the invariant half; the runtime appends VERSION_NAME.
+        assertEquals("AgentsBeamdown/", UpdateManager.USER_AGENT_PREFIX)
+        assertFalse(UpdateManager.USER_AGENT_PREFIX.contains("Dalvik"))
+        assertFalse(UpdateManager.USER_AGENT_PREFIX.contains("Android"))
+    }
+
     // ---- isDownloadStale ------------------------------------------------------
 
     @Test

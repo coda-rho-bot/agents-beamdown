@@ -71,9 +71,17 @@ object UpdateManager {
     const val MODE_AUTO_OVERNIGHT = "auto_overnight"
 
     // Public releases-only mirror (release pipeline dual-publishes here).
-    // Anonymous fetch — no token needed for release builds.
-    private const val FEED_URL =
-        "https://dl.angussoftware.dev/letta-environment/latest.json"
+    // Anonymous fetch — no token needed for release builds. Canonical path
+    // carries the rebrand; the legacy letta-environment path stays served by
+    // a symlink so existing installs keep updating (audit fix 3).
+    const val FEED_URL =
+        "https://dl.angussoftware.dev/agents-beamdown/latest.json"
+
+    // Neutral User-Agent for the feed check (audit fix 1): the implicit
+    // Dalvik UA ("Dalvik/x.y (Linux; U; Android <ver>; <model> ...)")
+    // fingerprints the device make/model to the feed host. App name + version
+    // is the standard-neutral form — enough for server logs, no device data.
+    const val USER_AGENT_PREFIX = "AgentsBeamdown/"
     private const val CHECK_INTERVAL_MS = 5 * 60 * 60 * 1000L   // spec: ~4-6h
     private const val TICK_MS = 30 * 60 * 1000L                // periodic tick granularity
     private const val OVERNIGHT_START_HOUR = 1                // 01:00 local
@@ -173,6 +181,7 @@ object UpdateManager {
                 val conn = URL(FEED_URL).openConnection() as HttpURLConnection
                 conn.connectTimeout = 10_000
                 conn.readTimeout = 15_000
+                conn.setRequestProperty("User-Agent", USER_AGENT_PREFIX + BuildConfig.VERSION_NAME)
                 val token = BuildConfig.UPDATE_FEED_TOKEN
                 if (token.isNotEmpty()) {
                     conn.setRequestProperty("Authorization", "token $token")
@@ -340,6 +349,10 @@ object UpdateManager {
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle("Agents Beamdown $tag")
             .setDescription("App update")
+            // Metered guard (audit fix 2): the overnight auto-update must
+            // never burn cellular data — DownloadManager pauses the download
+            // until an unmetered (wifi) network is available instead.
+            .setAllowedOverMetered(false)
             .setDestinationInExternalFilesDir(app, null, "updates/letta-environment-$tag.apk")
         val id = (app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
         p.edit()
