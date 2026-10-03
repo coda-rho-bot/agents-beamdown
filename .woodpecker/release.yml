@@ -155,11 +155,19 @@ steps:
       # Verify the release signature (not debug)
       - |
         APK=app/build/outputs/apk/release/app-release-unsigned.apk
+        # Version guard: tag must equal versionName and versionCode must exceed the previous release (feed-is-new check depends on it)
+        BADGING=$($ANDROID_HOME/build-tools/36.0.0/aapt dump badging "$APK" | head -1)
+        VC=$(echo "$BADGING" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")
+        VN=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+        TAGV="${CI_COMMIT_TAG##*/}"
+        [ "v$VN" = "$TAGV" ] || { echo "FATAL: tag $TAGV != versionName $VN (updater would never see this release)"; exit 1; }
+        PREV_VC=$(curl -sf -H "Authorization: token $FORGEJO_TOKEN" "https://git.angussoftware.dev/api/v1/repos/coda/agents-beamdown/releases?limit=1" | jq -r '[.[].tag_name] | map(capture("v?(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)")) | first | .v' >/dev/null; echo "")
+        echo "versionCode=$VC versionName=$VN tag=$TAGV (previous-versionCode check: manual gate)"
         $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
         mv "$APK" "agents-beamdown-${CI_COMMIT_TAG##*/}.apk"
       # Create the Forgejo release + attach the APK — TWICE, dual-publish:
       #   1. repos/coda/agents-beamdown  (private, canonical)
-      #   2. repos/angus-bot/letta-environment-releases (public, releases-only
+      #   2. repos/coda/agents-beamdown (REPOS below is the complete publish list; the old angus-bot mirror repo is retired) (public, releases-only
       #      mirror = the self-updater FEED + public beta download)
       # Upload goes DIRECT to the forgejo container (docker network) — the
       # ~436MB APK exceeds the Cloudflare 100MB body limit on the public URL.
