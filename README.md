@@ -17,6 +17,15 @@ appears in `letta environments list` ready for `--computer`-targeted crons and d
   secrets injection, skills
 - **No root required**
 
+## Quick start
+
+1. **Get a key** — create an account at [letta.com](https://letta.com) (free plan available), then Settings → API Keys → create a key (`sk-let-…`)
+2. **Install the app** — download the APK from [dl.angussoftware.dev/agents-beamdown](https://dl.angussoftware.dev/agents-beamdown) (phone + Wear OS watch, same file; install guides included)
+3. **Connect** — open the app, name your environment, paste the key, tap Start
+4. **Dispatch** — your device now appears in `letta environments list` on your Letta server
+
+Privacy: local processing, consent-gated device telemetry, no backend — [policy](https://legal.angussoftware.com/privacy-agents-beamdown/).
+
 ## How it works (the short version)
 
 Android's app sandbox blocks normal approaches (no proot, no exec from app data at
