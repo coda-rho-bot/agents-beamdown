@@ -109,6 +109,19 @@ def main(rootfs):
 
     print("4. letta.js link() -> writeFileSync wx")
     s = open(letta, "rb").read().decode("utf-8", "surrogateescape")
+    # Apache-2.0 §4(b): carry a prominent modification notice on the
+    # modified file. Idempotent — skipped when the header is already present
+    # (including on re-runs against previously patched rootfs trees).
+    MOD_HEADER = "// Modified by Agents Beamdown build — see NOTICE.md\n"
+    if MOD_HEADER in s:
+        print("  letta.js: modification header already present")
+    else:
+        if s.startswith("#!"):
+            nl = s.index("\n") + 1
+            s = s[:nl] + MOD_HEADER + s[nl:]
+        else:
+            s = MOD_HEADER + s
+        print("  letta.js: Apache-2.0 §4(b) modification header prepended")
     n = 0
     # remote-settings-lock (line ~151742)
     if "linkSync(candidatePath, targetPath);" in s:
