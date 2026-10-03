@@ -3,7 +3,7 @@
 Run a full [Letta Code](https://docs.letta.com) server on your Android phone as a
 **cloud execution environment** — agents on your Letta server can run tools, execute
 commands, and work autonomously on the device. Register it, tap Start, and your phone
-appears in `letta environments list` ready for `--computer`-targeted crons and dispatches.
+appears in `letta computers list` (older CLI: `letta environments list`) ready for `--computer`-targeted crons and dispatches.
 
 ```
 ┌─────────────┐  wss   ┌──────────────┐
@@ -66,7 +66,7 @@ Tap **Start environment**. The notification shows registration status; check
 
 | Component | Pinned | Why |
 |---|---|---|
-| letta-code | 0.30.27 | byte patches target exact offsets |
+| letta-code | 0.30.27 at v0.4.x build time (in-app "Upgrade letta version" moves it) | byte patches target exact offsets |
 | Node | 22.23.2 | io_uring probe offset |
 | glibc | 2.36 (bookworm) | rseq/set_robust_list patch sites |
 
@@ -81,7 +81,7 @@ are pattern-searched and version-resilient within glibc 2.3x.
   exempt the app (Settings → Battery → Unrestricted) for reliable long-run operation.
 - **API key entered at first run** (v0.2.0 onboarding) — builds are key-free;
   the app prompts for your key + environment name on first launch.
-- Single architecture (arm64-v8a). Debug-signed; release signing is a TODO.
+- Single architecture (arm64-v8a). Release builds are signed with a dedicated keystore (since v0.4.0) — signature continuity is what makes in-app updates install cleanly. Pre-v0.4 debug-signed installs cannot self-update (signature mismatch: uninstall first).
 - Diagnostics suite runs at every service start (adds ~5s; will be debug-gated).
 
 ## License
