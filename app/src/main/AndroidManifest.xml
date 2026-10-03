@@ -49,7 +49,14 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- The plaintext sk-let API key lives in SharedPreferences (letta_env):
+         Android's auto-backup would upload it to the user's Google account
+         cloud — contradicting the documented "key lives only on your device"
+         privacy promise. Backup is disabled outright; nothing in this app
+         is user-created data worth restoring anyway (the key is re-entered,
+         the rootfs re-downloads). Audit fix 4. -->
     <application
+        android:allowBackup="false"
         android:label="Agents Beamdown"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
