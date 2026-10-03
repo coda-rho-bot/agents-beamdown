@@ -73,6 +73,53 @@ class LettaEnvironmentService : Service() {
         const val PREF_ENV = "env_name"
         const val DEFAULT_ENV = "android"
 
+        // Registration-output → status mapping (tailer). Pure and
+        // JVM-testable (RegistrationLineTest): the tailer feeds each stdout
+        // line through [classifyRegistrationLine] and applies the returned
+        // status/notification pair, so the mapping lives here instead of
+        // inline in the thread body. Auth-rejection detection (audit fix 6):
+        // a 401/Unauthorized/invalid-key line in the registration output is
+        // surfaced as "Key rejected by Letta Cloud" — not a generic
+        // "exited: N" — so the user knows to re-key rather than reinstall.
+        /** Status classification for one line of server registration output. */
+        data class RegStatus(val status: String, val notification: String?)
+
+        /**
+         * Case-insensitive auth-rejection heuristic for server stdout lines.
+         * The server prints its own error text for rejected keys (401 /
+         * Unauthorized / invalid api key variants); matching is deliberately
+         * broad and substring-based because the exact wording comes from the
+         * letta server, not from this app, and may change between versions.
+         */
+        fun isAuthRejection(line: String): Boolean {
+            val l = line.lowercase()
+            return l.contains("401") ||
+                l.contains("unauthorized") ||
+                l.contains("invalid api key") ||
+                l.contains("invalid_api_key") ||
+                l.contains("invalid api-key") ||
+                l.contains("authentication failed") ||
+                l.contains("auth failed")
+        }
+
+        /**
+         * Map one stdout line to the status it should set, or null when the
+         * line carries no state signal (the common case — the server logs a
+         * lot of ordinary traffic). The notification is null when the caller
+         * composes it (the [Listen V2] case appends the current env name).
+         */
+        fun classifyRegistrationLine(line: String): RegStatus? = when {
+            isAuthRejection(line) ->
+                RegStatus("key rejected by Letta Cloud — check your API key", "Key rejected by Letta Cloud")
+            line.contains("Registering with") ->
+                RegStatus("registering with Letta Cloud", "Registering...")
+            line.contains("Registered successfully") ->
+                RegStatus("registered with Letta Cloud", "Registered — online")
+            line.contains("[Listen V2]") ->
+                RegStatus("online — listener active", null)
+            else -> null
+        }
+
         /**
          * True when no agent session/environment process is running (idle,
          * per the v0.2.8 lifecycle state machine). The self-updater gates
@@ -731,19 +778,9 @@ class LettaEnvironmentService : Service() {
                             var line = raf.readLine()
                             while (line != null) {
                                 log(line)
-                                when {
-                                    line.contains("Registering with") -> {
-                                        setStatus("registering with Letta Cloud")
-                                        updateNotification("Registering...")
-                                    }
-                                    line.contains("Registered successfully") -> {
-                                        setStatus("registered with Letta Cloud")
-                                        updateNotification("Registered — online")
-                                    }
-                                    line.contains("[Listen V2]") -> {
-                                        setStatus("online — listener active")
-                                        updateNotification("Online — ${envName()}")
-                                    }
+                                classifyRegistrationLine(line)?.let { rs ->
+                                    setStatus(rs.status)
+                                    updateNotification(rs.notification ?: "Online — ${envName()}")
                                 }
                                 pos = raf.filePointer
                                 line = raf.readLine()
@@ -764,12 +801,24 @@ class LettaEnvironmentService : Service() {
         // stops distinctly from crashes (review task_93 #5, partially).
         if (pendingOp.get() != null) {
             log("exit $code superseded by pending operation")
-        } else if (code >= 128) {
-            setStatus("crashed (signal ${code - 128})")
-            updateNotification("Crashed — exit $code")
         } else {
-            setStatus("exited: $code")
-            updateNotification("Stopped (exit $code)")
+            // Auth-rejection beats the bare exit code (audit fix 6): when the
+            // registration output flagged a rejected key, "exited: N" is
+            // misleading — the fix is a new key, not a reinstall/restart loop.
+            val statusFile = File(filesDir, "status.txt")
+            val rejectedKey = runCatching { statusFile.readText() }
+                .getOrDefault("")
+                .contains("key rejected by Letta Cloud")
+            if (rejectedKey) {
+                log("exit $code attributed to rejected API key")
+                updateNotification("Key rejected by Letta Cloud")
+            } else if (code >= 128) {
+                setStatus("crashed (signal ${code - 128})")
+                updateNotification("Crashed — exit $code")
+            } else {
+                setStatus("exited: $code")
+                updateNotification("Stopped (exit $code)")
+            }
         }
     }
 
