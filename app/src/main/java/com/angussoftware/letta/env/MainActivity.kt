@@ -392,7 +392,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Toast.makeText(this, "Upgrading — watch status", Toast.LENGTH_SHORT).show()
         }
         val rekeyPill = watchPill("Key / Name") { showOnboardingWatch() }
-        val a11yPill = watchPill("Ally control") {
+        val a11yPill = watchPill("Agent control") {
             if (isA11yEnabled()) {
                 runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
             } else {
@@ -504,7 +504,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setBackgroundColor(W.bg)
         }
-        content.addView(watchText("Letta", 20f, W.text, bold = true))
+        content.addView(watchText("Beamdown", 20f, W.text, bold = true))
         content.addView(watchText("Connect this watch as an environment.", 11.5f, W.textDim).apply {
             setPadding(0, dp(4), 0, dp(10))
         })
@@ -1471,7 +1471,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 tv.setTextColor(if (on) C.ok else C.textSecondary)
             }
             // Watch Ally-control pill: live label (ON → opens settings; OFF → guide)
-            watchA11yPill?.apply { text = if (a11yOn) "Ally control · ON" else "Ally control · OFF" }
+            watchA11yPill?.apply { text = if (a11yOn) "Agent control · ON" else "Agent control · OFF" }
 
             // Watch layout has no battery banner (null) — WearOS ignores the
             // exemption path entirely; the fix is the phone-side Wearable grant.
