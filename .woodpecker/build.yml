@@ -50,7 +50,7 @@ steps:
             print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
             sys.exit(1)
         HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
-        API = 'https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source'
+        API = 'https://git.angussoftware.dev/api/v1/repos/coda/agents-beamdown/releases/tags/internal%2Frootfs-source'
         try:
             req = urllib.request.Request(API, headers=HDRS)
             rel = json.load(urllib.request.urlopen(req, timeout=120))

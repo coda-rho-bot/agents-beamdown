@@ -66,7 +66,7 @@ steps:
             print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
             sys.exit(1)
         HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
-        API = 'https://git.angussoftware.dev/api/v1/repos/coda/letta-environment-android/releases/tags/internal%2Frootfs-source'
+        API = 'https://git.angussoftware.dev/api/v1/repos/coda/agents-beamdown/releases/tags/internal%2Frootfs-source'
         try:
             req = urllib.request.Request(API, headers=HDRS)
             rel = json.load(urllib.request.urlopen(req, timeout=120))
@@ -147,7 +147,7 @@ steps:
         $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
         mv "$APK" "agents-beamdown-${CI_COMMIT_TAG##*/}.apk"
       # Create the Forgejo release + attach the APK — TWICE, dual-publish:
-      #   1. repos/coda/letta-environment-android  (private, canonical)
+      #   1. repos/coda/agents-beamdown  (private, canonical)
       #   2. repos/angus-bot/letta-environment-releases (public, releases-only
       #      mirror = the self-updater FEED + public beta download)
       # Upload goes DIRECT to the forgejo container (docker network) — the
@@ -168,7 +168,7 @@ steps:
         # Dual-publish: private canonical repo + public releases-only mirror
         # (the mirror IS the self-updater feed — its releases/latest serves
         # the installed app, anonymous-downloadable).
-        REPOS = ['repos/coda/letta-environment-android']
+        REPOS = ['repos/coda/agents-beamdown']
         ROUTES = ['http://192.168.50.26:3301/api/v1', 'http://host.docker.internal:3000/api/v1', 'http://172.17.0.1:3000/api/v1', 'http://forgejo:3000/api/v1', 'https://git.angussoftware.dev/api/v1']
         def fatal(msg):
             print('FATAL: ' + msg, file=sys.stderr)
