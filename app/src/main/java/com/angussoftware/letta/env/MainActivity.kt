@@ -136,6 +136,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
     // ignored) and no collapsible log (log tail is always visible).
     private var batteryBanner: LinearLayout? = null
     private lateinit var batteryBannerText: TextView
+    // Spacer after batteryBanner — must hide with the banner or it leaves
+    // a double gap (banner GONE + orphaned 10dp spacer).
+    private var batteryBannerSpacer: View? = null
     private var logCard: LinearLayout? = null
     private var logHeader: LinearLayout? = null
     private var logChevron: TextView? = null
@@ -148,6 +151,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var updateCard: LinearLayout? = null
     private var updateText: TextView? = null
     private var updateBtn: Button? = null
+    // Spacer after updateCard — must hide with the card (card is GONE
+    // whenever no update is known / a session is running).
+    private var updateCardSpacer: View? = null
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -734,7 +740,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         batteryBanner?.addView(batteryBannerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(batteryBanner)
-        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+        batteryBannerSpacer = View(this)
+        root.addView(batteryBannerSpacer, LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- actions: two compact rows in one card ----
         val actionCard = LinearLayout(this).apply {
@@ -981,7 +988,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         applyCardSpacing(updateCard!!)
         root.addView(updateCard)
-        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+        // Card builds GONE; spacer must too, or it orphans until the first
+        // renderUpdateCard tick (up to 2s of stray gap after layout).
+        updateCardSpacer = View(this).apply { visibility = View.GONE }
+        root.addView(updateCardSpacer, LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- self-updater: update-mode setting row ----
         // Default "Prompt when idle"; optional "Install automatically
@@ -1603,6 +1613,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
             batteryBanner?.apply {
                 visibility =
                     if (isBatteryUnrestricted()) View.GONE else View.VISIBLE
+                // Keep the spacer in lockstep — an orphaned 10dp spacer after
+                // a GONE banner reads as a double gap between neighbors.
+                batteryBannerSpacer?.visibility = visibility
                 // Review #19 N3: solid error-tinted bg in light mode (white text
                 // on 15%-alpha red was unreadable); translucent in dark.
                 (background as? GradientDrawable)?.setColor(
@@ -1684,6 +1697,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 btn.isEnabled = true
             }
         }
+        // Keep the spacer in lockstep with the card — otherwise a GONE card
+        // leaves an orphaned 10dp spacer (double gap at that position).
+        updateCardSpacer?.visibility = card.visibility
     }
 }
 
