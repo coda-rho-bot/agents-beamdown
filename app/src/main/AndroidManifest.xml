@@ -82,6 +82,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Full-screen server log (v0.4.7): launched from the main screen's
+             "Server log" row — the log scrolls on its own page instead of a
+             nested inline card (scroll conflict + cramped window). -->
+        <activity
+            android:name=".ServerLogActivity"
+            android:exported="false"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|density|uiMode" />
+
         <service
             android:name=".LettaEnvironmentService"
             android:exported="false"

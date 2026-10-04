@@ -22,7 +22,6 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -143,10 +142,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
     // a double gap (banner GONE + orphaned 10dp spacer).
     private var batteryBannerSpacer: View? = null
     private var logCard: LinearLayout? = null
-    private var logHeader: LinearLayout? = null
     private var logChevron: TextView? = null
-    private var logScroll: ScrollView? = null
-    private lateinit var logView: TextView
+    // Watch-only (phone: the log lives on ServerLogActivity — its own
+    // full-screen page with its own 2s tick; the main screen just shows
+    // the launch row).
+    private var logView: TextView? = null
     private var logExpanded = false
     // Self-updater (v0.4.0): update card views — nullable because the card
     // only exists on the main layout (never onboarding), and the tick
@@ -545,11 +545,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         content.addView(logHeader, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
-        logView = watchText("", 10.5f, W.textDim, mono = true).apply {
+        val logTv = watchText("", 10.5f, W.textDim, mono = true).apply {
             gravity = Gravity.START
         }
-        watchLogView = logView
-        content.addView(logView, LinearLayout.LayoutParams(
+        logView = logTv
+        watchLogView = logTv
+        content.addView(logTv, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         logExpanded = true
 
@@ -581,7 +582,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    /** Expand/collapse the watch log section (tap the big header pill). */
+    /** Expand/collapse the watch log section (tap the big header pill).
+     *  Watch-only: on the phone the log launches ServerLogActivity instead. */
     private fun toggleWatchLog() {
         logExpanded = !logExpanded
         watchLogHeader?.text = if (logExpanded) "Server log  ▾" else "Server log  ▸"
@@ -1251,18 +1253,22 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(feedbackCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
-        // ---- collapsible log card ----
+        // ---- server log launch row (v0.4.7: full-screen log page) ----
+        // Harry, Oct 4: "server logs are not scrollable, server logs should
+        // just launch to a new page." The old inline collapsible card nested a
+        // ScrollView inside the main ScrollView (scroll conflict + cramped
+        // 220dp window). Now a single card row launches ServerLogActivity —
+        // the log scrolls on its own screen, the main screen scrolls one axis.
         logCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = card()
-        }
-        logHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(pad, dp(12), pad, dp(12))
+            background = card()
+            setPadding(pad, dp(14), pad, dp(14))
             gravity = Gravity.CENTER_VERTICAL
             isClickable = true
             foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).getDrawable(0)
-            setOnClickListener { toggleLog() }
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, ServerLogActivity::class.java))
+            }
         }
         val logTitle = TextView(this).apply {
             text = "Server log"
@@ -1270,28 +1276,20 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setTextColor(C.textPrimary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
-        logChevron = TextView(this).apply {
-            text = "▸"
-            textSize = 16f
-            setTextColor(C.textSecondary)
-        }
-        logHeader?.addView(logTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        logHeader?.addView(logChevron)
-        logCard?.addView(logHeader)
-
-        logView = TextView(this).apply {
+        val logHint = TextView(this).apply {
+            text = "Open full log"
             textSize = 12f
-            typeface = Typeface.MONOSPACE
             setTextColor(C.textSecondary)
-            setTextIsSelectable(true)
+            setPadding(dp(8), 0, 0, 0)
         }
-        val hScroll = HorizontalScrollView(this).apply { addView(logView) }
-        logScroll = ScrollView(this).apply {
-            addView(hScroll)
-            visibility = View.GONE
+        logChevron = TextView(this).apply {
+            text = "›"
+            textSize = 18f
+            setTextColor(C.textSecondary)
         }
-        logCard?.addView(logScroll, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(220)))
+        logCard?.addView(logTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        logCard?.addView(logHint)
+        logCard?.addView(logChevron)
         root.addView(logCard, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
@@ -1314,12 +1312,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun isDark(): Boolean =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-
-    private fun toggleLog() {
-        logExpanded = !logExpanded
-        logScroll?.visibility = if (logExpanded) View.VISIBLE else View.GONE
-        logChevron?.text = if (logExpanded) "▾" else "▸"
-    }
 
     /**
      * "What is Agents Beamdown?" collapsible card (Harry, Oct 4) — a
@@ -1781,22 +1773,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     if (isDark()) C.textPrimary else Color.WHITE)
             }
 
+            // Phone: the log lives on ServerLogActivity (full-screen page,
+            // own 2s tick) — the main screen only shows the launch row,
+            // nothing to tail here. Watch: log tail is inline (whole-view
+            // scroll). On the watch, DON'T auto-scroll to the log bottom —
+            // that would yank the user away from the status hero at the top.
             if (logExpanded) {
                 val tail = if (logFile.exists()) {
                     // tail-read: cap to last 64KB to bound main-thread work
                     RandomAccessTail.tail(logFile, 64 * 1024)
                 } else ""
-                // Phone: nested log scroll; watch: whole-view scroll. On the
-                // watch, DON'T auto-scroll to the log bottom — that would
-                // yank the user away from the status hero at the top.
-                val scroll = logScroll
-                if (scroll != null) {
-                    val atBottom = !scroll.canScrollVertically(1)
-                    logView.text = tail
-                    if (atBottom) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
-                } else {
-                    logView.text = tail
-                }
+                logView?.text = tail
             }
         }
     }
@@ -1883,8 +1870,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 }
 
-/** Bounded tail read: seek near end, return last complete lines. */
-private object RandomAccessTail {
+/** Bounded tail read: seek near end, return last complete lines.
+ *  Internal (not private): shared with ServerLogActivity (same module). */
+internal object RandomAccessTail {
     fun tail(f: File, maxBytes: Int): String {
         java.io.RandomAccessFile(f, "r").use { raf ->
             val start = maxOf(0L, raf.length() - maxBytes)

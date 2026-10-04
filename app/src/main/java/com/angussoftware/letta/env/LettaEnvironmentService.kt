@@ -44,6 +44,10 @@ import java.util.concurrent.TimeUnit
  */
 class LettaEnvironmentService : Service() {
 
+    // Internal (not private) so the JVM unit test can exercise the
+    // reconciliation decision core without an Android runtime.
+    internal enum class State { IDLE, STARTING, RUNNING, STOPPING }
+
     companion object {
         // Dedicated channel for the persistent environment-running notification so users
         // can control it independently from any future alert channels.
@@ -66,7 +70,6 @@ class LettaEnvironmentService : Service() {
         // death" (onDestroy stamps STOPPING unconditionally; see
         // isEnvironmentIdle's doc).
         private val workerAlive = java.util.concurrent.atomic.AtomicBoolean(false)
-        private enum class State { IDLE, STARTING, RUNNING, STOPPING }
         // Pending operation set while the server runs; the worker loop acts
         // on it after the current process exits (see worker body).
         private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
@@ -128,6 +131,17 @@ class LettaEnvironmentService : Service() {
         }
 
         /**
+         * Pure decision core of stale-state reconciliation (JVM-testable —
+         * LifecycleReconcileTest): a non-IDLE state is only real while it
+         * has an owner — a live worker thread, or a live server process
+         * (adopted from a previous service instance). When both are gone
+         * the state is a fossil from process death and must fall back to
+         * IDLE, or Start/Upgrade gate on it forever (v0.4.6 stuck-STOPPING).
+         */
+        internal fun reconciledState(state: State, workerAlive: Boolean, procAlive: Boolean): State =
+            if (state != State.IDLE && !workerAlive && !procAlive) State.IDLE else state
+
+        /**
          * True when no agent session/environment process is running (idle,
          * per the v0.2.8 lifecycle state machine). The self-updater gates
          * its prompts and overnight auto-installs on this — never update
@@ -180,6 +194,15 @@ class LettaEnvironmentService : Service() {
             }
         }
 
+        // Process-death truth, applied at EVERY entry path: onDestroy stamps
+        // STOPPING unconditionally, and if the worker already exited (SIGTERM
+        // kills node in milliseconds; onDestroy runs a main-thread hop later)
+        // nothing ever resets the enum — STOPPING sticks forever across
+        // service restarts (v0.4.6 on-device: Start button no-oped with
+        // status "Stopped"). Reconcile BEFORE dispatching any intent so
+        // every handler sees the true state.
+        reconcileStaleLifecycle()
+
         // agentctl notify: title/text extras on a broadcast routed here
         if (intent?.action == "com.angussoftware.letta.env.AGENT_NOTIFY") {
             postAgentAlert(
@@ -211,6 +234,25 @@ class LettaEnvironmentService : Service() {
             else -> handleStartIntent()
         }
         return START_STICKY
+    }
+
+    /**
+     * Reset a stale lifecycle enum to IDLE when process death proves no
+     * owner exists. The worker thread is the sole owner of STARTING/RUNNING;
+     * STOPPING is set by intent handlers/onDestroy and is only legitimately
+     * held while a worker or process is still draining. When BOTH the worker
+     * is gone AND no server process is alive, the state is a fossil from a
+     * previous service instance — force it back to IDLE so intent handlers
+     * don't gate on it forever (v0.4.6: stuck STOPPING made Start a silent
+     * no-op). Companion-visible state, so the logic is stated here once and
+     * applied from onStartCommand before any intent dispatch.
+     */
+    private fun reconcileStaleLifecycle() {
+        val s = lifecycle.get()
+        val target = reconciledState(s, workerAlive.get(), proc?.isAlive == true)
+        if (target != s && lifecycle.compareAndSet(s, target)) {
+            log("lifecycle: stale ${s.name.lowercase()} with no worker and no process — reset to idle")
+        }
     }
 
     /**
@@ -251,7 +293,16 @@ class LettaEnvironmentService : Service() {
                     reassertState()
                 }
             }
-            State.STOPPING -> log("start requested while stopping — ignoring")
+            State.STOPPING -> {
+                // Defense in depth: onStartCommand reconciles before dispatch,
+                // but if a stale STOPPING still lands here (no worker, no
+                // process), retry as a start instead of ignoring forever.
+                if (!workerAlive.get() && proc?.isAlive != true) {
+                    log("start requested while 'stopping' — but no worker/process exists; retrying as start")
+                    return handleStartIntent()
+                }
+                log("start requested while stopping — ignoring")
+            }
         }
     }
 
@@ -278,7 +329,15 @@ class LettaEnvironmentService : Service() {
                     log("upgrade already pending — ignoring")
                 }
             }
-            State.STOPPING -> log("upgrade requested while stopping — ignoring")
+            State.STOPPING -> {
+                // Same stale-state defense as handleStartIntent's STOPPING
+                // branch: a fossil STOPPING must not swallow the upgrade.
+                if (!workerAlive.get() && proc?.isAlive != true) {
+                    log("upgrade requested while 'stopping' — but no worker/process exists; retrying as upgrade")
+                    return handleUpgradeIntent()
+                }
+                log("upgrade requested while stopping — ignoring")
+            }
         }
     }
 
