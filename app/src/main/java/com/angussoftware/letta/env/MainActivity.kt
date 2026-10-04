@@ -221,7 +221,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(saveBtn)
         val spacer = View(this)
         root.addView(spacer, LinearLayout.LayoutParams(1, dp(24)))
-        setContentView(root)
+        // Scrollable (phone main-screen parity): the key/env fields + soft
+        // keyboard can exceed short displays. fillViewport preserves the
+        // CENTER_VERTICAL gravity when content fits.
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(root)
+        }
+        setContentView(scroll)
     }
 
     // ---- watch UI (WearOS) ----------------------------------------------------
@@ -693,6 +700,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         batteryBanner?.addView(batteryBannerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(batteryBanner)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- actions: two compact rows in one card ----
         val actionCard = LinearLayout(this).apply {
@@ -751,6 +759,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         row2.addView(upgradeBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         actionCard.addView(row1)
         actionCard.addView(row2)
+        root.addView(actionCard)
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
         // ---- phone-control setup card (accessibility off = agent can't drive UI) ----
         val a11yEnabled = isA11yEnabled()
@@ -1081,7 +1091,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(logCard, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        setContentView(root)
+        // Scrollable root (watch pattern): ~10 stacked cards overflow fixed
+        // height on shorter displays (ZFold 7 inner, 2184px — tiles smooshed
+        // since v0.4.x added cards). fillViewport keeps short content
+        // top-anchored and full-bleed instead of collapsing to wrap height.
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(root)
+        }
+        setContentView(scroll)
     }
 
     private fun isDark(): Boolean =
