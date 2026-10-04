@@ -59,6 +59,13 @@ class LettaEnvironmentService : Service() {
         // blocks in runEnvironment), making Upgrade a silent no-op whenever
         // the server was up (adversarial review Sep 20, finding task_93 #1).
         private val lifecycle = java.util.concurrent.atomic.AtomicReference(State.IDLE)
+        // True while a worker thread owns the starting/running states. The
+        // worker sets it in its first instruction and clears it in its finally
+        // block — companion-visible so isEnvironmentIdle() can distinguish
+        // "state machine has a live owner" from "stale enum after process
+        // death" (onDestroy stamps STOPPING unconditionally; see
+        // isEnvironmentIdle's doc).
+        private val workerAlive = java.util.concurrent.atomic.AtomicBoolean(false)
         private enum class State { IDLE, STARTING, RUNNING, STOPPING }
         // Pending operation set while the server runs; the worker loop acts
         // on it after the current process exits (see worker body).
@@ -125,8 +132,22 @@ class LettaEnvironmentService : Service() {
          * per the v0.2.8 lifecycle state machine). The self-updater gates
          * its prompts and overnight auto-installs on this — never update
          * out from under a live session.
+         *
+         * Process-death truth: [onDestroy] stamps STOPPING unconditionally,
+         * but the worker may have already exited to IDLE before the service
+         * tears down (SIGTERM kills node in milliseconds; onDestroy runs a
+         * main-thread hop later) — and once the worker thread is gone, no
+         * code path ever resets the state, so STOPPING sticks FOREVER across
+         * process death (v0.4.4 on-device: update card never re-appeared
+         * after stop → start → stop; Start intents were silently ignored).
+         * The worker thread is the sole owner of starting/running; when it
+         * is dead, the only live thing that can exist is a server process
+         * adopted from a previous service instance — so "no live process"
+         * IS the ground truth for idle, regardless of the stale enum.
          */
-        fun isEnvironmentIdle(): Boolean = lifecycle.get() == State.IDLE
+        fun isEnvironmentIdle(): Boolean =
+            if (workerAlive.get()) lifecycle.get() == State.IDLE
+            else proc?.isAlive != true
     }
 
     private fun apiKey(): String =
@@ -272,6 +293,10 @@ class LettaEnvironmentService : Service() {
      */
     private fun spawnWorker(upgradeFirst: Boolean = false) {
         worker = Thread {
+            // Companion-visible: isEnvironmentIdle() reads this to know the
+            // state machine has a live owner (see its doc for the stuck-STOPPING
+            // process-death bug this closes).
+            workerAlive.set(true)
             var doUpgrade = upgradeFirst
             try {
                 while (true) {
@@ -315,6 +340,7 @@ class LettaEnvironmentService : Service() {
                 }
             } finally {
                 lifecycle.set(State.IDLE)
+                workerAlive.set(false)
             }
         }.also { it.start() }
     }
@@ -1237,6 +1263,11 @@ class LettaEnvironmentService : Service() {
             description = "Messages the agent sends you from the environment (agentctl notify)"
         }
         nm.createNotificationChannel(alerts)
+        // App-update reminders (v0.4.5): visible channel users can disable at
+        // the OS level for update notifications. Created here too so it shows
+        // in system settings from boot (UpdateManager.createNotifChannel is
+        // idempotent and creates it lazily as well).
+        UpdateManager.createNotifChannel(this)
         // Remove the pre-v0.2.3 generic channel so it does not linger in system settings.
         nm.deleteNotificationChannel("letta-env")
     }

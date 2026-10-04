@@ -66,9 +66,19 @@ object UpdateManager {
     const val PREF_DL_DONE = "update_dl_done"          // download reached SUCCESSFUL
     const val PREF_DL_TAG = "update_dl_tag"            // tag the persisted download belongs to
     const val PREF_INSTALL_FIRED_FOR = "update_install_fired_for" // auto path: installer already opened for this tag (user cancel ≠ ask again every tick)
+    const val PREF_NOTIF_FREQ = "update_notif_freq"     // FREQ_ONCE | FREQ_DAILY | FREQ_3DAY | FREQ_OFF
+    const val PREF_NOTIF_TAG = "update_notif_tag"      // tag the last update notification was posted for
+    const val PREF_NOTIF_AT = "update_notif_at"        // epoch ms of the last update notification
 
     const val MODE_PROMPT = "prompt"
     const val MODE_AUTO_OVERNIGHT = "auto_overnight"
+
+    // Update-notification reminder frequencies (in-app setting row).
+    const val FREQ_OFF = "off"
+    const val FREQ_ONCE = "once"
+    const val FREQ_DAILY = "daily"
+    const val FREQ_3DAY = "every_3_days"
+    val FREQ_ORDER = listOf(FREQ_OFF, FREQ_ONCE, FREQ_DAILY, FREQ_3DAY)
 
     // Public releases-only mirror (release pipeline dual-publishes here).
     // Anonymous fetch — no token needed for release builds. Canonical path
@@ -162,6 +172,41 @@ object UpdateManager {
     fun isDownloadStale(dlTag: String?, updateTag: String?): Boolean =
         dlTag != null && updateTag != null && dlTag != updateTag
 
+    /**
+     * Pure notification decision (unit-tested in UpdateManagerTest): given
+     * the currently known update tag, the user's reminder frequency, and the
+     * dedupe state (tag last notified for, epoch ms it was notified at),
+     * decide whether an "update available" notification should be posted
+     * NOW.
+     *
+     *  - freq OFF          → never
+     *  - no known update   → never
+     *  - different tag     → always (first discovery of a new release —
+     *                        including the very first one)
+     *  - same tag, ONCE    → never (already told about this release)
+     *  - same tag, DAILY   → re-notify when 24h elapsed since last notify
+     *  - same tag, 3DAY    → re-notify when 72h elapsed
+     *  - same tag, unknown freq → treat as OFF (never notify on garbage)
+     */
+    fun shouldNotify(
+        updateTag: String?, freq: String, lastNotifiedTag: String?, lastNotifiedAt: Long, now: Long
+    ): Boolean {
+        if (updateTag.isNullOrEmpty()) return false
+        // Validate the frequency FIRST: an unknown pref value (manual edit,
+        // migration gap) is treated as Off — silent, never a guess.
+        when (freq) {
+            FREQ_ONCE, FREQ_DAILY, FREQ_3DAY -> Unit
+            else -> return false // FREQ_OFF and anything unrecognized
+        }
+        if (updateTag != lastNotifiedTag) return true
+        return when (freq) {
+            FREQ_ONCE -> false
+            FREQ_DAILY -> now - lastNotifiedAt >= 24 * 60 * 60 * 1000L
+            FREQ_3DAY -> now - lastNotifiedAt >= 3 * 24 * 60 * 60 * 1000L
+            else -> false
+        }
+    }
+
     // ---- feed check ----------------------------------------------------------
 
     /**
@@ -191,10 +236,14 @@ object UpdateManager {
                     val rel = parseLatestRelease(body)
                     if (rel != null && rel.apkUrl != null) {
                         if (isNewer(rel.tag, BuildConfig.VERSION_NAME)) {
+                            val wasTag = prefs(app).getString(PREF_UPDATE_TAG, null)
                             prefs(app).edit()
                                 .putString(PREF_UPDATE_TAG, rel.tag)
                                 .putString(PREF_UPDATE_URL, rel.apkUrl)
                                 .apply()
+                            // First discovery of a new tag → notify promptly
+                            // (don't wait for the next 30-min periodic tick).
+                            if (wasTag != rel.tag) maybeNotify(app)
                         } else {
                             clearAvailable(app) // up to date — drop stale prompt
                         }
@@ -229,8 +278,86 @@ object UpdateManager {
                 }
                 maybeCheckAsync(app)
                 maybeAutoInstall(app)
+                maybeNotify(app)
             }
         }.apply { isDaemon = true }.start()
+    }
+
+    // ---- update-available notifications --------------------------------------
+
+    const val NOTIF_CHANNEL_ID = "letta-env-app-updates"
+    private const val NOTIF_ID_UPDATES = 9001
+
+    /**
+     * Create (idempotent) the "App updates" notification channel. Users can
+     * disable update notifications at the OS level by turning this channel
+     * off — that IS the channel control. IMPORTANCE_DEFAULT: visible +
+     * no persistent heads-up nagging.
+     */
+    fun createNotifChannel(context: Context) {
+        if (android.os.Build.VERSION.SDK_INT < 26) return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
+            as android.app.NotificationManager
+        val ch = android.app.NotificationChannel(
+            NOTIF_CHANNEL_ID, "App updates", android.app.NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "A new Agents Beamdown version is available"
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(ch)
+    }
+
+    /**
+     * Post the "update available" notification when [shouldNotify] says so
+     * (dedupe on (tag, last-notified-at) per the user's reminder frequency).
+     * Called from the 30-min periodic tick and after each feed check that
+     * discovers a newer tag. Tapping opens the app.
+     */
+    fun maybeNotify(context: Context) {
+        val app = context.applicationContext
+        val p = prefs(app)
+        val tag = p.getString(PREF_UPDATE_TAG, null) ?: return
+        val freq = p.getString(PREF_NOTIF_FREQ, FREQ_ONCE) ?: FREQ_ONCE
+        val now = System.currentTimeMillis()
+        if (!shouldNotify(
+                tag, freq,
+                p.getString(PREF_NOTIF_TAG, null),
+                p.getLong(PREF_NOTIF_AT, 0),
+                now
+            )
+        ) return
+        createNotifChannel(app)
+        val nm = app.getSystemService(Context.NOTIFICATION_SERVICE)
+            as android.app.NotificationManager
+        val pi = android.app.PendingIntent.getActivity(
+            app, 0,
+            android.content.Intent(app, MainActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = android.app.Notification.Builder(app, NOTIF_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setContentTitle("Update available")
+            .setContentText("Agents Beamdown $tag — open the app to download and install")
+            .setStyle(android.app.Notification.BigTextStyle()
+                .bigText("Agents Beamdown $tag — open the app to download and install"))
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build()
+        runCatching { nm.notify(NOTIF_ID_UPDATES, n) } // POST_NOTIFICATIONS not granted → skip silently
+        p.edit()
+            .putString(PREF_NOTIF_TAG, tag)
+            .putLong(PREF_NOTIF_AT, now)
+            .apply()
+    }
+
+    /** Reset notification dedupe state (called when availability clears). */
+    private fun clearNotifState(context: Context) {
+        prefs(context).edit()
+            .remove(PREF_NOTIF_TAG)
+            .remove(PREF_NOTIF_AT)
+            .apply()
     }
 
     /**
@@ -312,6 +439,13 @@ object UpdateManager {
             .remove(PREF_DL_TAG)
             .remove(PREF_INSTALL_FIRED_FOR)
             .apply()
+        // Update installed/withdrawn: drop the posted notification and the
+        // dedupe state so the NEXT release notifies from scratch.
+        clearNotifState(app)
+        runCatching {
+            (app.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .cancel(NOTIF_ID_UPDATES)
+        }
     }
 
     // ---- download ------------------------------------------------------------

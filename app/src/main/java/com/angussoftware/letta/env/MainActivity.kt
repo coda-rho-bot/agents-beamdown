@@ -157,6 +157,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
     // Spacer after updateCard — must hide with the card (card is GONE
     // whenever no update is known / a session is running).
     private var updateCardSpacer: View? = null
+    // Update chip INSIDE the status card: "v0.4.5 available — stop to
+    // update" while an update is known AND the environment is running (the
+    // full update card is idle-only by design — the install flow requires
+    // idle). Tapping offers to stop the env. Null on watch (separate chip
+    // below the status hero) and onboarding.
+    private var updateChip: TextView? = null
+    // Watch update chip: same info, under the status hero (round layout —
+    // the phone status card doesn't exist there).
+    private var watchUpdateChip: TextView? = null
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -438,6 +447,22 @@ class MainActivity : androidx.activity.ComponentActivity() {
         content.addView(statusLine)
         content.addView(envLine)
         content.addView(versionLine)
+        // Watch update chip (v0.4.5 feature): same info as the phone status
+        // card chip — update known AND running. Cheap single text row under
+        // the hero (fits the round layout); tap → stop via the same dialog
+        // pattern the watch already uses (no AlertDialog on watch — direct
+        // action + Toast, matching the upgrade pill).
+        watchUpdateChip = watchText("", 10.5f, 0xFFFBBF24.toInt()).apply {
+            setPadding(0, dp(2), 0, 0)
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                stopEnvironment()
+                Toast.makeText(this@MainActivity, "Stopping — update card will appear", Toast.LENGTH_SHORT).show()
+            }
+        }
+        content.addView(watchUpdateChip)
         // NOTE: no battery pill on watch — One UI Watch ships NO per-app
         // battery controls (app details: Permissions/Version/Storage only,
         // verified Sep 25 on Galaxy Watch 8), and ACTION_REQUEST_IGNORE_
@@ -767,6 +792,27 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setTextColor(C.textSecondary)
         }
         statusCol.addView(versionLine)
+        // Update chip (v0.4.5 feature): visible ONLY while an update is
+        // known AND the environment is running — the full update card with
+        // Download/Install is idle-only by design. Tap → offer to stop.
+        updateChip = TextView(this).apply {
+            textSize = 12f
+            setTextColor(C.warn)
+            setPadding(0, dp(2), 0, 0)
+            visibility = View.GONE
+            isClickable = true
+            foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+                .getDrawable(0)?.apply { setBounds(0, 0, 0, 0) }
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Stop the environment?")
+                    .setMessage("An app update is waiting. Stopping the environment now lets you download and install it from the update card. You can start the environment again right after.")
+                    .setPositiveButton("Stop") { _, _ -> stopEnvironment() }
+                    .setNegativeButton("Not now", null)
+                    .show()
+            }
+        }
+        statusCol.addView(updateChip)
         statusCard.addView(statusDot)
         statusCard.addView(statusCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(statusCard)
@@ -1098,10 +1144,56 @@ class MainActivity : androidx.activity.ComponentActivity() {
             textSize = 11f
             setTextColor(C.textSecondary)
         }
+        // Reminder frequency (v0.4.5 feature): how often an update-available
+        // NOTIFICATION is re-posted while an update stays uninstalled.
+        // Off / Once / Daily / Every 3 days. The notification itself lives
+        // in the OS "App updates" channel — disable it there for channel
+        // control. Cycles on tap; label always shows the current value.
+        val freqLabels = mapOf(
+            UpdateManager.FREQ_OFF to "Reminders: Off",
+            UpdateManager.FREQ_ONCE to "Reminders: Once per update",
+            UpdateManager.FREQ_DAILY to "Reminders: Daily",
+            UpdateManager.FREQ_3DAY to "Reminders: Every 3 days"
+        )
+        val freqBtn = Button(this).apply {
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+            fun currentFreq() = p.getString(UpdateManager.PREF_NOTIF_FREQ, UpdateManager.FREQ_ONCE)!!
+            text = freqLabels[currentFreq()]!!
+            setOnClickListener {
+                val cur = currentFreq()
+                val next = UpdateManager.FREQ_ORDER[
+                    (UpdateManager.FREQ_ORDER.indexOf(cur) + 1) % UpdateManager.FREQ_ORDER.size]
+                p.edit().putString(UpdateManager.PREF_NOTIF_FREQ, next).apply()
+                text = freqLabels[next]!!
+                val msg = when (next) {
+                    UpdateManager.FREQ_OFF ->
+                        "No update notifications. You'll still see the update card in the app."
+                    UpdateManager.FREQ_ONCE ->
+                        "You'll be notified once when a new version is discovered."
+                    UpdateManager.FREQ_DAILY ->
+                        "You'll be re-notified daily while a new version stays uninstalled."
+                    else ->
+                        "You'll be re-notified every 3 days while a new version stays uninstalled."
+                }
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+        val freqExplain = TextView(this).apply {
+            text = "Notifications appear in the \"App updates\" channel (Settings > Apps > Agents Beamdown > Notifications to disable). Tapping one opens the app."
+            textSize = 11f
+            setTextColor(C.textSecondary)
+        }
         settingsCard.addView(settingsLabel)
         settingsCard.addView(modeBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         settingsCard.addView(modeExplain)
+        settingsCard.addView(freqBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        settingsCard.addView(freqExplain)
         applyCardSpacing(settingsCard, 0) // "App updates" header → tighter gap to mode button
         root.addView(settingsCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
@@ -1765,6 +1857,29 @@ class MainActivity : androidx.activity.ComponentActivity() {
         // Keep the spacer in lockstep with the card — otherwise a GONE card
         // leaves an orphaned 10dp spacer (double gap at that position).
         updateCardSpacer?.visibility = card.visibility
+        renderUpdateChip(tag, idle, dlId != -1L || dlDone)
+    }
+
+    /**
+     * Update chip (v0.4.5 feature): while an update is known AND the
+     * environment is running, show a small "vX.Y.Z available — stop to
+     * update" row on the status card (phone) / under the status hero
+     * (watch). The full update card stays idle-only (install requires
+     * idle); this closes the "always-on users never see prompts" gap.
+     * Hidden when: no update known, idle (the full card takes over), or a
+     * download is already in flight/done (the card owns that state —
+     * downloading works while running).
+     */
+    private fun renderUpdateChip(tag: String?, idle: Boolean, downloadActive: Boolean) {
+        val show = tag != null && !idle && !downloadActive
+        updateChip?.apply {
+            visibility = if (show) View.VISIBLE else View.GONE
+            if (show) text = "$tag available — stop to update"
+        }
+        watchUpdateChip?.apply {
+            visibility = if (show) View.VISIBLE else View.GONE
+            if (show) text = "$tag — stop to update"
+        }
     }
 }
 

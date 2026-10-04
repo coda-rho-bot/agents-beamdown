@@ -129,4 +129,78 @@ class UpdateManagerTest {
         assertFalse(UpdateManager.isDownloadStale("v0.4.0", null))   // no known update
         assertFalse(UpdateManager.isDownloadStale(null, null))
     }
+
+    // ---- shouldNotify (update-available notification dedupe/frequency) -----
+
+    private val DAY = 24 * 60 * 60 * 1000L
+
+    @Test
+    fun neverWhenNoUpdateKnown() {
+        assertFalse(UpdateManager.shouldNotify(null, UpdateManager.FREQ_ONCE, null, 0, 1000))
+        assertFalse(UpdateManager.shouldNotify("", UpdateManager.FREQ_DAILY, null, 0, 1000))
+    }
+
+    @Test
+    fun neverWhenFrequencyOff() {
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_OFF, null, 0, 1000))
+        // Even a brand-new tag stays silent on Off.
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_OFF, "v0.4.4", 0, 1000))
+    }
+
+    @Test
+    fun firstDiscoveryOfAnyTagAlwaysNotifies() {
+        // Never notified at all.
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_ONCE, null, 0, 1000))
+        // Different tag than the last notification → new release discovered.
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_ONCE, "v0.4.4", 999, 1000))
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_DAILY, "v0.4.4", 999, 1000))
+    }
+
+    @Test
+    fun onceNeverReNotifiesForSameTag() {
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_ONCE, "v0.4.5", 0, 1000))
+        // Even after a long time — "once" means once per release.
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_ONCE, "v0.4.5", 0, 100 * DAY))
+    }
+
+    @Test
+    fun dailyReNotifiesAfter24h() {
+        val t0 = 1_000_000L
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_DAILY, "v0.4.5", t0, t0 + DAY - 1))   // just short
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_DAILY, "v0.4.5", t0, t0 + DAY))        // exactly 24h
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_DAILY, "v0.4.5", t0, t0 + 5 * DAY))    // long past
+    }
+
+    @Test
+    fun threeDayReNotifiesAfter72h() {
+        val t0 = 1_000_000L
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_3DAY, "v0.4.5", t0, t0 + 3 * DAY - 1))
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_3DAY, "v0.4.5", t0, t0 + 3 * DAY))
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_3DAY, "v0.4.5", t0, t0 + 10 * DAY))
+    }
+
+    @Test
+    fun dailyDoesNotFireOn3DayBoundaryEarly() {
+        // Daily must not wait 3 days, and 3-day must not fire at 24h.
+        val t0 = 1_000_000L
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_3DAY, "v0.4.5", t0, t0 + DAY))
+        assertTrue(UpdateManager.shouldNotify("v0.4.5", UpdateManager.FREQ_DAILY, "v0.4.5", t0, t0 + DAY))
+    }
+
+    @Test
+    fun unknownFrequencyTreatedAsSilent() {
+        // Garbage pref value (manual edit, migration gap) → never notify.
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", "weekly", "v0.4.4", 0, 1000))
+        assertFalse(UpdateManager.shouldNotify("v0.4.5", "weekly", null, 0, 1000))
+    }
+
+    @Test
+    fun frequencyOrderCoversAllValues() {
+        // The settings button cycles FREQ_ORDER — every cycle step must be
+        // a value shouldNotify understands (no dead states in the cycle).
+        assertEquals(
+            listOf(UpdateManager.FREQ_OFF, UpdateManager.FREQ_ONCE, UpdateManager.FREQ_DAILY, UpdateManager.FREQ_3DAY),
+            UpdateManager.FREQ_ORDER
+        )
+    }
 }
