@@ -62,6 +62,13 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
             typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(Button(this).apply {
+            text = "Share"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { shareLog() }
+        })
+        header.addView(Button(this).apply {
             text = "Close"
             textSize = 13f
             backgroundTintList = android.content.res.ColorStateList.valueOf(C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
@@ -105,14 +112,47 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
      * Tail the log file and render. Pin to the bottom when the user is
      * already at the bottom (live tailing); never yank the view while the
      * user is scrolled up reading history.
+     *
+     * While the user has an active text selection, the refresh is a no-op:
+     * setText() would destroy the selection handles and make copy-paste
+     * impossible against a live tail (Harry Oct 4: "the server logs keep
+     * updating so it's impossible to select the text to copy and paste").
+     * Also skip the update when the tail is unchanged — setText churn
+     * resets layout/scroll state for nothing.
      */
     private fun renderLog() {
         runCatching {
+            if (logView.hasSelection()) return
             val logFile = File(filesDir, "server.log")
             val tail = if (logFile.exists()) RandomAccessTail.tail(logFile, 64 * 1024) else ""
+            val next = tail.ifEmpty { "No log output yet." }
+            if (next == logView.text.toString()) return
             val atBottom = !scroll.canScrollVertically(1)
-            logView.text = tail.ifEmpty { "No log output yet." }
+            logView.text = next
             if (atBottom) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
+    }
+
+    /**
+     * Copy the current tail (same 64KB the page shows) to the clipboard and
+     * confirm with a Toast. This is the reliable path to get the log out of
+     * the device on One UI — the ACTION_SEND chooser can be flaky for large
+     * plain-text payloads, and clipboard works everywhere. Diagnostic path
+     * for the stop→"Failed" bug: Harry pastes the FATAL line back to Coda.
+     */
+    private fun shareLog() {
+        val text = logView.text.toString()
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Server log", text))
+            android.widget.Toast.makeText(this, "Copied", android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            // Clipboard unavailable (rare): fall back to the share chooser.
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TEXT, text)
+            }
+            startActivity(android.content.Intent.createChooser(intent, "Share server log"))
         }
     }
 
