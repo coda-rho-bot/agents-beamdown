@@ -84,6 +84,38 @@ class MainActivity : androidx.activity.ComponentActivity() {
         setStroke(dp(1), C.outline)
     }
 
+    // ---- within-card vertical rhythm (ONE rule, no per-site magic) ----
+    // Measured on live v0.4.3 (ZFold 7, ~2.75x density): gaps between stacked
+    // card children ranged 0px (feedback button stack, "App updates" header
+    // → button) to ~22px (= dp(8), the action card's designed padding).
+    // The rule: 8dp between every stacked child; 6dp from a bold section
+    // header down to its content (deliberate convention, applied uniformly).
+    private val CARD_GAP_DP = 8
+    private val HEADER_GAP_DP = 6
+
+    /**
+     * Apply the uniform within-card spacing rule: every child after the
+     * first gets a [CARD_GAP_DP] top margin; a child directly below a
+     * section header (header's index in [headers]) uses the tighter
+     * [HEADER_GAP_DP] gap. Call once after all children are added — and do
+     * NOT also set per-site spacing paddings on card children.
+     *
+     * Scope: multi-child VERTICAL cards. Excluded by design: horizontal
+     * cards (status card), single-row cards (phone-control), and the log
+     * card (its header is a self-padding touch target that owns its rhythm).
+     */
+    private fun applyCardSpacing(card: LinearLayout, vararg headers: Int) {
+        val headerSet = headers.toHashSet()
+        var belowHeader = 0 in headerSet
+        for (i in 1 until card.childCount) {
+            val child = card.getChildAt(i)
+            val lp = child.layoutParams as? LinearLayout.LayoutParams ?: continue
+            lp.topMargin = dp(if (belowHeader) HEADER_GAP_DP else CARD_GAP_DP)
+            child.layoutParams = lp
+            belowHeader = i in headerSet
+        }
+    }
+
     // ---- views ----
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var statusDot: TextView
@@ -732,7 +764,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         row1.addView(stopBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         val row2 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
         }
         val rekeyBtn = actionButton("Key / Name").apply {
             setOnClickListener { showOnboarding() }
@@ -759,6 +790,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         row2.addView(upgradeBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         actionCard.addView(row1)
         actionCard.addView(row2)
+        applyCardSpacing(actionCard)
         root.addView(actionCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
@@ -825,13 +857,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
             background = card()
             setPadding(pad, dp(12), pad, dp(12))
         }
-        teleCard.addView(TextView(this).apply {
+        val teleHeader = TextView(this).apply {
             text = "T E L E M E T R Y"
             textSize = 12f
             setTextColor(C.textSecondary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            setPadding(0, 0, 0, dp(6))
-        })
+        }
+        teleCard.addView(teleHeader)
         // Health row: HC SDK availability + granted count.
         healthTextView = TextView(this).apply {
             textSize = 13f
@@ -911,6 +943,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         notifRow.addView(notifTextView!!, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         notifRow.addView(notifBtn)
         teleCard.addView(notifRow)
+        applyCardSpacing(teleCard, 0) // header index 0 → tighter header-to-content gap
         root.addView(teleCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
@@ -944,6 +977,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateCard!!.addView(updateText)
         updateCard!!.addView(updateBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        applyCardSpacing(updateCard!!)
         root.addView(updateCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
@@ -996,12 +1030,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
             text = "Automatic overnight install still needs the one-time system \"install unknown apps\" grant and shows the installer's confirmation screen."
             textSize = 11f
             setTextColor(C.textSecondary)
-            setPadding(0, dp(6), 0, 0)
         }
         settingsCard.addView(settingsLabel)
         settingsCard.addView(modeBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         settingsCard.addView(modeExplain)
+        applyCardSpacing(settingsCard, 0) // "App updates" header → tighter gap to mode button
         root.addView(settingsCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
@@ -1044,6 +1078,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         feedbackCard.addView(kofiBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        applyCardSpacing(feedbackCard)
         root.addView(feedbackCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
