@@ -20,4 +20,11 @@ object FeedbackLinks {
 
     /** Support page (Ko-fi — same ACTION_VIEW pattern as Fuel Dashboard). */
     const val KOFI_URL = "https://ko-fi.com/angussoftware"
+
+    /**
+     * Privacy policy (legal.angussoftware.com — same page the download site
+     * dl.angussoftware.dev/agents-beamdown links to; URL pulled from its
+     * index.html, not invented).
+     */
+    const val PRIVACY_URL = "https://legal.angussoftware.com/privacy-agents-beamdown/"
 }

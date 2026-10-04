@@ -41,6 +41,16 @@ class FeedbackLinksTest {
     }
 
     @Test
+    fun privacyUrlIsThePublishedPolicy() {
+        // Contract: the exact URL the download page (dl.angussoftware.dev/
+        // agents-beamdown) links to — a typo here sends users to a 404.
+        assertEquals(
+            "https://legal.angussoftware.com/privacy-agents-beamdown/",
+            FeedbackLinks.PRIVACY_URL
+        )
+    }
+
+    @Test
     fun newIssueUrlIsWellFormedHttps() {
         // https scheme, host, no spaces — must open in a browser as-is.
         assertTrue(FeedbackLinks.NEW_ISSUE_URL.startsWith("https://"))

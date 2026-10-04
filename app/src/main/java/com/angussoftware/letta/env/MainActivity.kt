@@ -13,6 +13,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.text.InputType
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ClickableSpan
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -257,6 +260,31 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(subtitle)
         root.addView(fieldCard)
         root.addView(saveBtn)
+        // Consent line: the policy is a clickable link inside the sentence
+        // (12sp textSecondary, link in C.accent) — same ACTION_VIEW pattern
+        // as the feedback buttons, via openExternalUrl.
+        val privacyLine = TextView(this).apply {
+            textSize = 12f
+            setTextColor(C.textSecondary)
+            setPadding(0, dp(6), 0, 0)
+            val prefix = "By continuing you agree to the "
+            val linkText = "privacy policy"
+            val span = SpannableString(prefix + linkText)
+            val start = prefix.length
+            span.setSpan(object : ClickableSpan() {
+                override fun onClick(widget: View) {
+                    openExternalUrl(FeedbackLinks.PRIVACY_URL)
+                }
+                override fun updateDrawState(ds: android.text.TextPaint) {
+                    ds.color = C.accent
+                    ds.isUnderlineText = true
+                }
+            }, start, start + linkText.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            text = span
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+            highlightColor = android.graphics.Color.TRANSPARENT
+        }
+        root.addView(privacyLine)
         // "What is Agents Beamdown?" — collapsed by default, below the
         // primary action so it explains without standing in the way.
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(24)))
@@ -458,8 +486,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val kofiPill = watchPill("Support on Ko-fi") {
             openExternalUrl(FeedbackLinks.KOFI_URL)
         }
+        val privacyPill = watchPill("Privacy policy") {
+            openExternalUrl(FeedbackLinks.PRIVACY_URL)
+        }
         listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill,
-               reportPill, sourcePill, kofiPill).forEach { b ->
+               reportPill, sourcePill, kofiPill, privacyPill).forEach { b ->
             content.addView(b, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
@@ -606,6 +637,30 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 envField.text.toString().trim().ifEmpty { DEFAULT_ENV })
         })
         content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        // Consent line (phone onboarding parity): policy as a clickable link,
+        // same ACTION_VIEW path via openExternalUrl.
+        content.addView(TextView(this).apply {
+            includeFontPadding = false
+            textSize = 10.5f
+            setTextColor(W.textFaint)
+            gravity = Gravity.CENTER_HORIZONTAL
+            val prefix = "By continuing you agree to the "
+            val linkText = "privacy policy"
+            val span = SpannableString(prefix + linkText)
+            val start = prefix.length
+            span.setSpan(object : ClickableSpan() {
+                override fun onClick(widget: View) {
+                    openExternalUrl(FeedbackLinks.PRIVACY_URL)
+                }
+                override fun updateDrawState(ds: android.text.TextPaint) {
+                    ds.color = W.accent
+                    ds.isUnderlineText = true
+                }
+            }, start, start + linkText.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            text = span
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+            highlightColor = android.graphics.Color.TRANSPARENT
+        })
         // Cancel: only meaningful when re-keying (a key exists); otherwise no
         // main screen to go back to — hide it on first-run onboarding.
         if (!savedKey.isNullOrBlank()) {
@@ -1084,11 +1139,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setTextColor(C.accent)
             setOnClickListener { openExternalUrl(FeedbackLinks.KOFI_URL) }
         }
+        val privacyBtn = Button(this).apply {
+            text = "Privacy policy"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.PRIVACY_URL) }
+        }
         feedbackCard.addView(reportBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         feedbackCard.addView(sourceBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         feedbackCard.addView(kofiBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        feedbackCard.addView(privacyBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         applyCardSpacing(feedbackCard)
         root.addView(feedbackCard)
