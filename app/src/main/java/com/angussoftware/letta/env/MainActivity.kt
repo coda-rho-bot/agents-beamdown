@@ -251,8 +251,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(subtitle)
         root.addView(fieldCard)
         root.addView(saveBtn)
-        val spacer = View(this)
-        root.addView(spacer, LinearLayout.LayoutParams(1, dp(24)))
+        // "What is Agents Beamdown?" — collapsed by default, below the
+        // primary action so it explains without standing in the way.
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(24)))
+        root.addView(buildAboutCard())
         // Scrollable (phone main-screen parity): the key/env fields + soft
         // keyboard can exceed short displays. fillViewport preserves the
         // CENTER_VERTICAL gravity when content fits.
@@ -1125,6 +1127,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, dp(220)))
         root.addView(logCard, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+
+        // ---- "What is Agents Beamdown?" (bottom of scroll, below log) ----
+        // Same collapsible card as onboarding: there but not in the way.
+        root.addView(buildAboutCard())
 
         // Scrollable root (watch pattern): ~10 stacked cards overflow fixed
         // height on shorter displays (ZFold 7 inner, 2184px — tiles smooshed
@@ -1145,6 +1152,71 @@ class MainActivity : androidx.activity.ComponentActivity() {
         logExpanded = !logExpanded
         logScroll?.visibility = if (logExpanded) View.VISIBLE else View.GONE
         logChevron?.text = if (logExpanded) "▾" else "▸"
+    }
+
+    /**
+     * "What is Agents Beamdown?" collapsible card (Harry, Oct 4) — a
+     * comprehensive explanation of the app, shown on BOTH the onboarding
+     * screen (below Save & Start) and the main screen (below the feedback
+     * card). Collapsed by default; per-screen Boolean state, no
+     * persistence. Same collapse mechanics as the log card (chevron
+     * header row + GONE body).
+     */
+    private fun buildAboutCard(): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+        }
+        var expanded = false
+        val chevron = TextView(this).apply {
+            text = "▸"
+            textSize = 16f
+            setTextColor(C.textSecondary)
+        }
+        // Copy is Harry's, verbatim (Oct 4) — one paragraph per TextView,
+        // applyCardSpacing handles the vertical rhythm (8dp between).
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(16), dp(12))
+            visibility = View.GONE
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            foreground = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).getDrawable(0)
+            setOnClickListener {
+                expanded = !expanded
+                body.visibility = if (expanded) View.VISIBLE else View.GONE
+                chevron.text = if (expanded) "▾" else "▸"
+            }
+        }
+        val title = TextView(this).apply {
+            text = "What is Agents Beamdown?"
+            textSize = 14f
+            setTextColor(C.textPrimary)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(chevron)
+        card.addView(header)
+        val paragraphs = listOf(
+            "Agents Beamdown turns your Android phone into a home for your Letta AI agents. It runs a complete agent environment — a real Linux toolchain with git, Node and Python — entirely on the device, and connects it to your Letta account over the internet.",
+            "Letta (letta.com) is an open-source framework for AI agents with persistent memory: agents that remember you, your projects and their past work across sessions instead of starting from zero each time.",
+            "The API key connects this app to your Letta account (api.letta.com). If you don't have one yet, create a free account at letta.com and generate a key in your account settings. The key never leaves your device.",
+            "Once running, your agents can execute code and commands, read and write files, and — only with your explicit permission — use device capabilities: health and location telemetry, notification reading, and phone control through Android's accessibility layer. Every permission-bearing action asks first.",
+        )
+        for (p in paragraphs) {
+            body.addView(TextView(this).apply {
+                text = p
+                textSize = 13f
+                setTextColor(C.textSecondary)
+            })
+        }
+        applyCardSpacing(body)
+        card.addView(body)
+        return card
     }
 
     /**
