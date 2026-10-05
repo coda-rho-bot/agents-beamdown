@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Advertised on every install (harmless on phones — capabilities are
+     queried cross-device, and a phone never looks for this one). -->
+<wearable-capabilities>
+    <capability name="beamdown_watch" />
+</wearable-capabilities>

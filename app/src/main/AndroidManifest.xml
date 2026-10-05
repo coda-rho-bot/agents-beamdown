@@ -170,5 +170,11 @@
                 <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_key_sync" />
             </intent-filter>
         </service>
+            <!-- Watch↔phone discovery for key sync (WatchKeySync): the watch
+             advertises this capability; the phone checks for a reachable
+             node before sending instead of a false-success toast. -->
+        <meta-data
+            android:name="com.google.android.wearable.capabilities"
+            android:resource="@xml/wear_capabilities" />
     </application>
 </manifest>

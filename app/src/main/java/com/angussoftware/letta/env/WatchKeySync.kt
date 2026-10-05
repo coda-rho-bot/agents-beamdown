@@ -2,6 +2,7 @@ package com.angussoftware.letta.env
 
 import android.content.Context
 import android.util.Log
+import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.DataClient
 import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
@@ -26,6 +27,30 @@ object WatchKeySync {
     const val KEY_FIELD = "api_key"
     const val ENV_FIELD = "env_name"
     const val TS_FIELD = "sent_at"
+
+    /** Capability the watch app advertises (res/xml/wear_capabilities.xml). */
+    const val WATCH_CAPABILITY = "beamdown_watch"
+
+    /**
+     * Phone side: is a watch with Beamdown installed currently reachable?
+     * Distinguishes "no watch / no app" from "watch present": DataClient
+     * writes always succeed locally (queued for later sync), so without
+     * this check the send button reports success into the void.
+     */
+    fun checkWatchReachable(context: Context, onResult: (Boolean) -> Unit) {
+        val client = Wearable.getCapabilityClient(context)
+        client.getCapability(WATCH_CAPABILITY, CapabilityClient.FILTER_REACHABLE).apply {
+            addOnSuccessListener { cap ->
+                val reachable = cap.nodes.any { it.isNearby }
+                Log.i(TAG, "watch capability: ${cap.nodes.size} node(s), reachable=$reachable")
+                onResult(reachable)
+            }
+            addOnFailureListener { e ->
+                Log.w(TAG, "capability check failed: ${e.message}")
+                onResult(false)
+            }
+        }
+    }
 
     /** Phone side: push the key (+ env name) to the connected watch. */
     fun sendKey(context: Context, apiKey: String, envName: String, onResult: (Boolean, String) -> Unit) {

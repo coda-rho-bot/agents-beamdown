@@ -29,4 +29,11 @@ class WatchKeySyncTest {
         assertEquals("WatchKeySync", WatchKeySync.TAG)
         assertTrue(WatchKeySync.TAG.length <= 23) // Android log tag limit
     }
+
+    @Test
+    fun capabilityMatchesManifestDeclaration() {
+        // res/xml/wear_capabilities.xml and the phone-side query must agree;
+        // a mismatch makes every check report "no watch".
+        assertEquals("beamdown_watch", WatchKeySync.WATCH_CAPABILITY)
+    }
 }

@@ -987,11 +987,25 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     return@setOnClickListener
                 }
                 val envName = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV).orEmpty()
-                text = "Sending…"
-                WatchKeySync.sendKey(this@MainActivity, savedKey, envName) { ok, msg ->
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, if (ok) "Key sent to watch" else msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
-                        text = "Send key to watch"
+                text = "Checking watch…"
+                WatchKeySync.checkWatchReachable(this@MainActivity) { reachable ->
+                    if (!reachable) {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "No watch with Beamdown found. Install the app on the watch (same APK) and keep it nearby.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            text = "Send key to watch"
+                        }
+                        return@checkWatchReachable
+                    }
+                    text = "Sending…"
+                    WatchKeySync.sendKey(this@MainActivity, savedKey, envName) { ok, msg ->
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, if (ok) "Key sent to watch" else msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                            text = "Send key to watch"
+                        }
                     }
                 }
             }
