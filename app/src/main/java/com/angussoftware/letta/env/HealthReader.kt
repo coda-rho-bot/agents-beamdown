@@ -107,8 +107,8 @@ object HealthReader {
             }
             if (granted == 0) return JSONObject().put("ok", false)
                 .put("error", "HR permission not granted on this watch — grant via " +
-                    "pm grant com.angussoftware.letta.env android.permission.BODY_SENSORS " +
-                    "(or the Telemetry > Health Grant button), then retry")
+                    "adb shell pm grant com.angussoftware.letta.env " +
+                    "android.permission.BODY_SENSORS, then retry")
 
             val measure = androidx.health.services.client.HealthServices
                 .getClient(ctx).measureClient

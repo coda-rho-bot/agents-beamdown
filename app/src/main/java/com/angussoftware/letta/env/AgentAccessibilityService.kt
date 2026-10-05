@@ -516,7 +516,7 @@ class AgentAccessibilityService : AccessibilityService() {
         add("launch", "uri", "open ACTION_VIEW intent", "works where shell am start is OEM-blocked")
         add("session", "\"desc\" [seconds]", "request user consent overlay — REQUIRED before any read/click/type/launch; blocks up to 120s waiting for Approve/Deny")
         add("status", "", "current session state (active, expiry, pending prompt)")
-        add("health", "status|hr|steps [hours]|sleep [days]|skin", "health telemetry — permission-scoped (Health Connect grant IS consent)",
+        add("health", "status|hr|steps [hours]|sleep [days]", "health telemetry — permission-scoped (Health Connect grant IS consent)",
             "hr reads the newest synced sample (may lag the watch by minutes); status shows grant state before first use")
         add("location", "", "last-known fix {lat,lon,accuracyM,ageSec} or one current fetch",
             "permission-scoped — location grant IS consent")
