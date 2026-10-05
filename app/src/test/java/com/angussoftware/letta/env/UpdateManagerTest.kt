@@ -130,6 +130,86 @@ class UpdateManagerTest {
         assertFalse(UpdateManager.isDownloadStale(null, null))
     }
 
+    // ---- updateCardState (phone card + watch pill row state machine) ------
+    // The watch previously had NO update card: renderUpdateCard() bailed at
+    // `updateCard ?: return` (field only assigned in phone showMain()), so
+    // the watch "stop to update" chip promised a card that never appeared
+    // (dead end, Oct 5 parity audit #1). Both form factors now share this
+    // machine — these tests pin the watch-path cases explicitly.
+
+    @Test
+    fun cardHiddenWhenNoUpdateKnown() {
+        // Watch case: no update → pill row must stay GONE (never a stray row).
+        assertEquals(
+            UpdateManager.UpdateCardState.HIDDEN,
+            UpdateManager.updateCardState(null, idle = true, downloadId = -1, downloadDone = false)
+        )
+        assertEquals(
+            UpdateManager.UpdateCardState.HIDDEN,
+            UpdateManager.updateCardState("", idle = true, downloadId = -1, downloadDone = false)
+        )
+    }
+
+    @Test
+    fun cardHiddenWhileRunningNoDownload() {
+        // Watch case: update known but env running → the "stop to update"
+        // chip owns that state; the pill row stays hidden until idle.
+        assertEquals(
+            UpdateManager.UpdateCardState.HIDDEN,
+            UpdateManager.updateCardState("v0.4.5", idle = false, downloadId = -1, downloadDone = false)
+        )
+    }
+
+    @Test
+    fun cardDownloadWhenIdleAndAvailable() {
+        // Watch case: idle + update known → Download pill renders (the
+        // state the chip's "update card will appear" Toast promises).
+        assertEquals(
+            UpdateManager.UpdateCardState.DOWNLOAD,
+            UpdateManager.updateCardState("v0.4.5", idle = true, downloadId = -1, downloadDone = false)
+        )
+    }
+
+    @Test
+    fun cardDownloadingEvenWhileRunning() {
+        // Once the user taps Download we don't yank the card — progress
+        // shows in any run state (matches the phone card's documented
+        // behavior; the chip defers to the card while a download is active).
+        assertEquals(
+            UpdateManager.UpdateCardState.DOWNLOADING,
+            UpdateManager.updateCardState("v0.4.5", idle = false, downloadId = 42, downloadDone = false)
+        )
+        assertEquals(
+            UpdateManager.UpdateCardState.DOWNLOADING,
+            UpdateManager.updateCardState("v0.4.5", idle = true, downloadId = 42, downloadDone = false)
+        )
+    }
+
+    @Test
+    fun cardInstallWhenDownloaded() {
+        // Downloaded → Install pill (routes to the unknown-apps grant
+        // settings when missing — same as the phone Install button).
+        assertEquals(
+            UpdateManager.UpdateCardState.INSTALL,
+            UpdateManager.updateCardState("v0.4.5", idle = false, downloadId = 42, downloadDone = true)
+        )
+        assertEquals(
+            UpdateManager.UpdateCardState.INSTALL,
+            UpdateManager.updateCardState("v0.4.5", idle = true, downloadId = 42, downloadDone = true)
+        )
+    }
+
+    @Test
+    fun cardInstallTakesPrecedenceOverDownloading() {
+        // dlDone wins over dlId: reconcileDownloadState flips dlDone once
+        // the download succeeds while the id is still persisted — the
+        // card must show Install, not a frozen "Downloading… 100%".
+        assertEquals(
+            UpdateManager.UpdateCardState.INSTALL,
+            UpdateManager.updateCardState("v0.4.5", idle = true, downloadId = 42, downloadDone = true)
+        )
+    }
+
     // ---- shouldNotify (update-available notification dedupe/frequency) -----
 
     private val DAY = 24 * 60 * 60 * 1000L

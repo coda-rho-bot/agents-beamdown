@@ -151,10 +151,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var logExpanded = false
     // Self-updater (v0.4.0): update card views — nullable because the card
     // only exists on the main layout (never onboarding), and the tick
-    // guards on initialization anyway.
+    // guards on initialization anyway. Assigned by BOTH form factors:
+    // phone showMain() (card + Button) and watch showMainWatch() (pill row
+    // + TextView pill — updateBtn is TextView? so the watch pill fits).
+    // Before the watch assignment existed, renderUpdateCard() bailed at
+    // `updateCard ?: return` and the watch "stop to update" chip promised
+    // a card that never appeared (dead end, Oct 5 parity audit #1).
     private var updateCard: LinearLayout? = null
     private var updateText: TextView? = null
-    private var updateBtn: Button? = null
+    private var updateBtn: TextView? = null
     // Spacer after updateCard — must hide with the card (card is GONE
     // whenever no update is known / a session is running).
     private var updateCardSpacer: View? = null
@@ -471,6 +476,39 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
         }
         content.addView(watchUpdateChip)
+        // Watch update pills (parity fix, Oct 5): the chip's Toast promises
+        // "update card will appear" — before this row existed, renderUpdateCard()
+        // bailed at `updateCard ?: return` (the field was only assigned in
+        // phone showMain()) and NOTHING ever appeared. Same state machine as
+        // the phone card (UpdateManager.updateCardState): Download pill when
+        // idle + update known, progress text while downloading, Install pill
+        // when downloaded. Round-safe: full-width rows inside the
+        // inscribed-square safe area (applyWatchSafeArea on the scroll),
+        // same 52dp pill pattern as Start/Stop. Drives the SAME
+        // enqueueDownload/install machinery — form-factor agnostic.
+        val watchUpdateRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE // renderUpdateCard owns visibility
+        }
+        updateText = watchText("", 10.5f, W.textDim).apply {
+            setPadding(0, 0, 0, dp(4))
+        }
+        updateBtn = watchPill("Download", style = 1) {
+            // Same action routing as the phone card's button.
+            val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+            when {
+                p.getBoolean(UpdateManager.PREF_DL_DONE, false) ->
+                    UpdateManager.install(this@MainActivity)
+                p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> Unit // in-flight; tick shows progress
+                else -> UpdateManager.enqueueDownload(this@MainActivity)
+            }
+        }
+        watchUpdateRow.addView(updateText)
+        watchUpdateRow.addView(updateBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        updateCard = watchUpdateRow
+        content.addView(watchUpdateRow)
         // NOTE: no battery pill on watch — One UI Watch ships NO per-app
         // battery controls (app details: Permissions/Version/Storage only,
         // verified Sep 25 on Galaxy Watch 8), and ACTION_REQUEST_IGNORE_
@@ -1816,7 +1854,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (key.isNullOrBlank()) "not set" else "sk-let-" + "•".repeat(6) + key.takeLast(4)
 
     /**
-     * Self-updater card state machine (2s tick):
+     * Self-updater card state machine (2s tick), shared by phone card and
+     * watch pill row (the decision logic is UpdateManager.updateCardState —
+     * unit-tested there):
      *  - no update known            → hidden
      *  - update known, RUNNING      → hidden (queued until idle — spec)
      *  - update known, IDLE         → "vX.Y.Z available — Download"
@@ -1838,28 +1878,32 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val dlId = p.getLong(UpdateManager.PREF_DL_ID, -1)
         val dlDone = p.getBoolean(UpdateManager.PREF_DL_DONE, false)
         val idle = LettaEnvironmentService.isEnvironmentIdle()
-        when {
-            tag == null -> card.visibility = View.GONE
-            dlDone -> {
+        // Watch palette (W) on watch, phone palette (C) on phone — the
+        // phone palette is light-mode-adapted and muddy on the watch's
+        // black AMOLED (same convention as renderVersionLine).
+        val primary = if (isWatch()) W.text else C.textPrimary
+        val warn = if (isWatch()) 0xFFFBBF24.toInt() else C.warn
+        when (UpdateManager.updateCardState(tag, idle, dlId, dlDone)) {
+            UpdateManager.UpdateCardState.HIDDEN -> card.visibility = View.GONE
+            UpdateManager.UpdateCardState.INSTALL -> {
                 card.visibility = View.VISIBLE
                 tv.text = "$tag downloaded"
-                tv.setTextColor(C.textPrimary)
+                tv.setTextColor(primary)
                 btn.text = "Install"
                 btn.isEnabled = true
             }
-            dlId != -1L -> {
+            UpdateManager.UpdateCardState.DOWNLOADING -> {
                 val pct = UpdateManager.downloadProgress(this, dlId)
                 card.visibility = View.VISIBLE
                 tv.text = if (pct != null) "Downloading $tag — $pct%" else "Downloading $tag…"
-                tv.setTextColor(C.warn)
+                tv.setTextColor(warn)
                 btn.text = "Downloading…"
                 btn.isEnabled = false
             }
-            !idle -> card.visibility = View.GONE // queued while a session runs
-            else -> {
+            UpdateManager.UpdateCardState.DOWNLOAD -> {
                 card.visibility = View.VISIBLE
                 tv.text = "$tag available"
-                tv.setTextColor(C.textPrimary)
+                tv.setTextColor(primary)
                 btn.text = "Download"
                 btn.isEnabled = true
             }

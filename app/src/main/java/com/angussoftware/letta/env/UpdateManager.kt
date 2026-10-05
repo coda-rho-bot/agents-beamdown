@@ -162,6 +162,38 @@ object UpdateManager {
         return false // equal
     }
 
+    // ---- update card state machine (phone card + watch pill row) ------------
+
+    /**
+     * UI state for the update prompt, shared by the phone update card and
+     * the watch update pill row (both rendered by renderUpdateCard on the
+     * 2s tick). Pure so the state machine is unit-testable
+     * (UpdateManagerTest.updateCardState*), including the watch parity
+     * cases: the watch previously had NO card at all — its "stop to
+     * update" chip promised a card that never rendered (dead end, Oct 5
+     * parity audit blocker #1). Both form factors now share this machine:
+     *
+     *  - no update known        → HIDDEN
+     *  - update, RUNNING        → HIDDEN (queued until idle — install
+     *                              requires idle; the "stop to update"
+     *                              chip owns the running state)
+     *  - download in flight     → DOWNLOADING (any run state — once the
+     *                              user taps Download we don't yank the card)
+     *  - downloaded             → INSTALL
+     *  - update known, IDLE     → DOWNLOAD
+     */
+    enum class UpdateCardState { HIDDEN, DOWNLOAD, DOWNLOADING, INSTALL }
+
+    fun updateCardState(
+        tag: String?, idle: Boolean, downloadId: Long, downloadDone: Boolean
+    ): UpdateCardState = when {
+        tag.isNullOrEmpty() -> UpdateCardState.HIDDEN
+        downloadDone -> UpdateCardState.INSTALL
+        downloadId != -1L -> UpdateCardState.DOWNLOADING
+        !idle -> UpdateCardState.HIDDEN
+        else -> UpdateCardState.DOWNLOAD
+    }
+
     /**
      * True when the persisted download belongs to a different release than
      * the currently known update — the feed moved on while a download sat
