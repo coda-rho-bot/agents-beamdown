@@ -974,8 +974,32 @@ class MainActivity : androidx.activity.ComponentActivity() {
         row2.addView(rekeyBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         row2.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
         row2.addView(upgradeBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        // ---- row3: phone→watch key handoff (WatchKeySync) ----
+        // Visible on phones only; the same APK on the watch never reaches
+        // showMain (watch uses showMainWatch), and a watch has no paired
+        // watch to send to anyway.
+        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val sendKeyBtn = actionButton("Send key to watch").apply {
+            setOnClickListener {
+                val savedKey = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "").orEmpty()
+                if (savedKey.isBlank()) {
+                    Toast.makeText(this@MainActivity, "No key saved yet — set one first (Key / Name).", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                val envName = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV).orEmpty()
+                text = "Sending…"
+                WatchKeySync.sendKey(this@MainActivity, savedKey, envName) { ok, msg ->
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, if (ok) "Key sent to watch" else msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                        text = "Send key to watch"
+                    }
+                }
+            }
+        }
+        row3.addView(sendKeyBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         actionCard.addView(row1)
         actionCard.addView(row2)
+        if (!isWatch()) actionCard.addView(row3)
         applyCardSpacing(actionCard)
         root.addView(actionCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))

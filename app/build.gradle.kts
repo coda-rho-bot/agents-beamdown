@@ -83,6 +83,10 @@ dependencies {
     // needed on the COMPILE classpath (the AAR only scopes it runtime).
     // The rest of Compose stays an unused runtime transitive.
     implementation("com.angussoftware.theming:theming-compose:0.14.1")
+    // Wear OS DataClient — phone→watch API-key handoff (WatchKeySync). The
+    // thin wearable layer only; the app never requires Google Play services
+    // to function — the send button just reports unreachable when absent.
+    implementation("com.google.android.gms:play-services-wearable:18.2.0")
     implementation("org.jetbrains.compose.ui:ui:1.11.1")
 
     testImplementation("junit:junit:4.13.2")

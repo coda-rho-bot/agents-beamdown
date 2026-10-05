@@ -160,5 +160,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- Phone→watch API-key handoff (WatchKeySync). Wear OS delivers
+             onDataChanged on the watch side; inert on phones. -->
+        <service
+            android:name=".WatchKeySyncListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_key_sync" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
