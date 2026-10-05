@@ -26,6 +26,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.angussoftware.letta.env.BuildConfig
 import java.io.File
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -447,6 +448,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
         content.addView(statusLine)
         content.addView(envLine)
         content.addView(versionLine)
+        // App version (Harry, Oct 4): faint single line under the hero —
+        // round-safe (full-width centered text, inside the inscribed-square
+        // safe area), visible without any interaction.
+        content.addView(watchText(
+            "Beamdown v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            10.5f, W.textFaint
+        ).apply { setPadding(0, dp(2), 0, 0) })
         // Watch update chip (v0.4.5 feature): same info as the phone status
         // card chip — update known AND running. Cheap single text row under
         // the hero (fits the round layout); tap → stop via the same dialog
@@ -613,6 +621,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         content.addView(watchText("Connect this watch as an environment.", 11.5f, W.textDim).apply {
             setPadding(0, dp(4), 0, dp(10))
         })
+        // App version (Harry, Oct 4): faint line under the title — same
+        // round-safe centered pattern as the main-screen hero.
+        content.addView(watchText(
+            "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            10.5f, W.textFaint
+        ).apply { setPadding(0, 0, 0, dp(10)) })
         val savedKey = prefs.getString(PREF_KEY, "")
         val keyField = EditText(this).apply {
             // Pre-fill the saved key (masked) on re-key so the user can
@@ -1357,7 +1371,16 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setTextColor(C.textPrimary)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
+        // App version in the header (Harry, Oct 4): visible WITHOUT
+        // expanding — at-a-glance check on every screen the card shows on.
+        val version = TextView(this).apply {
+            text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+            textSize = 12f
+            setTextColor(C.textSecondary)
+            setPadding(dp(8), 0, 0, 0)
+        }
         header.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(version)
         header.addView(chevron)
         card.addView(header)
         val paragraphs = listOf(
