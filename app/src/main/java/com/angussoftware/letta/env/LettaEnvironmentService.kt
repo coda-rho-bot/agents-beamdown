@@ -48,6 +48,13 @@ class LettaEnvironmentService : Service() {
     // reconciliation decision core without an Android runtime.
     internal enum class State { IDLE, STARTING, RUNNING, STOPPING }
 
+    // Pending operation set while the server runs; the worker loop acts on
+    // it after the current process exits (see worker body). Internal so the
+    // JVM-testable classifyWorkerException (companion) can take it as a
+    // parameter — nested-in-companion classifiers are not reachable from
+    // the test source set via the class name.
+    internal enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
+
     companion object {
         // Dedicated channel for the persistent environment-running notification so users
         // can control it independently from any future alert channels.
@@ -73,7 +80,6 @@ class LettaEnvironmentService : Service() {
         // Pending operation set while the server runs; the worker loop acts
         // on it after the current process exits (see worker body).
         private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
-        private enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
@@ -140,6 +146,43 @@ class LettaEnvironmentService : Service() {
          */
         internal fun reconciledState(state: State, workerAlive: Boolean, procAlive: Boolean): State =
             if (state != State.IDLE && !workerAlive && !procAlive) State.IDLE else state
+
+        /**
+         * Classification for an exception thrown out of [runEnvironment]
+         * while a worker is mid-flight (the worker loop's catch-all, on-device
+         * v0.4.9: Stop button raced this handler and the status flip-flopped
+         * between "stopped (by user)" and "failed: null" — the "FATAL: null"
+         * log signature was an exception with a null message, almost
+         * certainly the reader/worker interrupted by the Stop handler's
+         * proc.destroy()). Pure and JVM-testable (WorkerExceptionPolicyTest):
+         * when a shutdown is in flight (pendingOp == SHUTDOWN, or the
+         * lifecycle is draining a stop, or the user-stop marker exists) the
+         * exception is a benign consequence of OUR OWN teardown, not a server
+         * failure — it must not overwrite the truthful "stopped" status.
+         */
+        data class WorkerExceptionPolicy(val benign: Boolean, val logLine: String)
+
+        /** see [WorkerExceptionPolicy]. */
+        internal fun classifyWorkerException(
+            t: Throwable,
+            pendingOp: PendingOp?,
+            state: State,
+            userStopMarker: Boolean
+        ): WorkerExceptionPolicy =
+            if (pendingOp == PendingOp.SHUTDOWN || state == State.STOPPING || userStopMarker) {
+                WorkerExceptionPolicy(
+                    benign = true,
+                    logLine = "reader interrupted during shutdown (${t.javaClass.simpleName}) — not a failure"
+                )
+            } else {
+                // Real failure: always name the exception class — a bare
+                // "FATAL: null" (null-message InterruptedException etc.) is
+                // undiagnosable from the log alone.
+                WorkerExceptionPolicy(
+                    benign = false,
+                    logLine = "FATAL: ${t.javaClass.simpleName}: ${t.message}"
+                )
+            }
 
         /**
          * True when no agent session/environment process is running (idle,
@@ -371,9 +414,25 @@ class LettaEnvironmentService : Service() {
                     try {
                         runEnvironment()
                     } catch (t: Throwable) {
-                        log("FATAL: ${t.message}")
-                        setStatus("failed: ${t.message ?: t.javaClass.simpleName}")
-                        updateNotification("Failed")
+                        // v0.4.9 on-device: Stop (ACTION_STOP_EXPLICIT) sets
+                        // pendingOp=SHUTDOWN + STOPS the lifecycle + writes
+                        // the user-stop marker + proc.destroy() — and the
+                        // reader/worker blocked on the dying process throws a
+                        // null-message exception that landed HERE, flipping
+                        // the status to "failed: null" ~half the time and
+                        // racing the stop handler's own "stopped (by user)"
+                        // write. When a shutdown is in flight the exception
+                        // is a consequence of OUR teardown, not a failure —
+                        // log it benignly and leave the truthful stop status.
+                        val policy = classifyWorkerException(
+                            t, pendingOp.get(), lifecycle.get(),
+                            File(filesDir, ".user-stopped").exists()
+                        )
+                        log(policy.logLine)
+                        if (!policy.benign) {
+                            setStatus("failed: ${t.javaClass.simpleName}: ${t.message}")
+                            updateNotification("Failed")
+                        }
                     }
                     // Process exited. Drain pending op, else idle.
                     when (pendingOp.getAndSet(null)) {
