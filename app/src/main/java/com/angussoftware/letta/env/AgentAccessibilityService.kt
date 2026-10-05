@@ -284,7 +284,7 @@ class AgentAccessibilityService : AccessibilityService() {
         val gated = cmd !in setOf(
             "ping", "commands", "capabilities", "home", "back",
             "notifications", "session", "status",
-            "health", "location", "notifstatus")
+            "health", "location", "notifstatus", "logtail")
         if (gated) gate()?.let { return it }
 
         return when (cmd) {
@@ -321,6 +321,11 @@ class AgentAccessibilityService : AccessibilityService() {
                 .put("granted", AgentNotificationListener.granted(applicationContext))
                 .put("snapshotCount", AgentNotificationListener.current().optInt("count", 0))
             "notiflist" -> AgentNotificationListener.current()
+            // App's OWN diagnostic log (lifecycle lines the app writes about
+            // itself — no user content): the a11y service shares the app
+            // process, so this reads filesDir/server.log where release-build
+            // run-as and a11y text caps cannot reach. Ungated by design.
+            "logtail" -> logTail(req.optInt("bytes", 4096))
         "tap" -> gestureTap(req.getDouble("x"), req.getDouble("y"), req.optDouble("duration", 50.0))
         "longPress" -> gestureTap(req.getDouble("x"), req.getDouble("y"), 800.0)
         "swipe" -> gestureSwipe(
@@ -412,6 +417,18 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     // ---- screen reading --------------------------------------------------------------
+
+    /** Tail of the app's own server.log — diagnostic self-read, ungated.
+     *  Mirrors visibleText's JSON shape: {"ok":true,"tail":"<last N bytes>"}. */
+    private fun logTail(bytes: Int): JSONObject {
+        val n = bytes.coerceIn(1, 16384)
+        val f = File(applicationContext.filesDir, "server.log")
+        if (!f.exists()) return ok().put("tail", "")
+        return runCatching { RandomAccessTail.tail(f, n, maxChars = n) }
+            .fold({ tail -> ok().put("tail", tail) },
+                { e -> err().put("error", e.message ?: e.javaClass.simpleName) })
+    }
+
 
     private fun visibleText(): JSONObject {
         val root = rootInActiveWindow ?: return err().put("error", "no active window")
@@ -505,10 +522,12 @@ class AgentAccessibilityService : AccessibilityService() {
             "permission-scoped — location grant IS consent")
         add("notifstatus", "", "notification-listener grant state + snapshot count (no content)")
         add("notiflist", "", "active notifications (pkg/title/text)", "SESSION-GATED — message content is privacy-peer to screen")
+        add("logtail", "[bytes]", "last N bytes (default 4096, max 16384) of the app's own server.log",
+            "NOT session-gated — the app's own lifecycle lines, no user content")
         return ok().put("commands", cmds)
             .put("gesturesBlocked", gesturesBlocked)
             .put("consentGate", true)
-            .put("note", "consent-gated: screen/tree/click/clickId/text/tap/longPress/swipe/key/launch require an approved session; agentctl session requests one via full-screen overlay. gesturesBlocked is learned: first cancelled gesture flips it.")
+            .put("note", "consent-gated: screen/tree/click/clickId/text/tap/longPress/swipe/key/launch/notiflist require an approved session; agentctl session requests one via full-screen overlay. logtail is ungated (app's own diagnostic log). gesturesBlocked is learned: first cancelled gesture flips it.")
     }
 
     /**

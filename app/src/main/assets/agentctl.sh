@@ -25,6 +25,7 @@
 #   agentctl location               (last-known/one-shot fix; location grant IS consent)
 #   agentctl notifstatus            (notification-listener grant state, no content)
 #   agentctl notiflist              (active notifications pkg/title/text — SESSION-GATED)
+#   agentctl logtail [bytes]        (last N bytes of the app's own server.log, default 4096, max 16384 — NOT session-gated: app's own lifecycle lines, no user content)
 #
 # CONSENT-GATED: screen/tree/click/text/launch need an approved session first:
 #   agentctl session "what you want to do" [seconds]   -> full-screen Approve/Deny overlay
@@ -71,6 +72,7 @@ case "${1:-help}" in
     hcrequest)  send '{"cmd":"hcrequest"}' ;;
     notifstatus) send '{"cmd":"notifstatus"}' ;;
     notiflist)  send '{"cmd":"notiflist"}' ;;
+    logtail)    send "{\"cmd\":\"logtail\",\"bytes\":${2:-4096}}" ;;
     session)
         SECS="${3:-300}"
         DESC=$(printf '%s' "$2" | sed 's/"/\\"/g')
@@ -87,6 +89,6 @@ case "${1:-help}" in
             echo '{"ok":true,"via":"broadcast"}'
         ;;
     help|*)
-        sed -n '2,25p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'
+        sed -n '2,26p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'
         ;;
 esac

@@ -22,8 +22,9 @@ import java.io.File
  *
  * The log source is unchanged: filesDir/server.log, tail-read via
  * [RandomAccessTail] (64KB cap — bounded main-thread work, same bound the
- * inline card used). A 2s tick refreshes the tail and keeps the view pinned
- * to the bottom while the user is already there.
+ * inline card used). A 2s tick refreshes the tail and follows the bottom
+ * ONLY until the user scrolls up (userScrolledUp flag) — after that, new
+ * content renders without moving the view until they return to the bottom.
  */
 class ServerLogActivity : androidx.activity.ComponentActivity() {
 
@@ -31,6 +32,13 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var logView: TextView
     private lateinit var scroll: ScrollView
+
+    /** True once the user has manually scrolled away from the bottom this
+     *  session; cleared again when they return to the bottom. While set, the
+     *  2s refresh does NOT snap the view down — the old code re-pinned on
+     *  every render because setText() shrinks the content, making
+     *  canScrollVertically(1) briefly false, so scrolling up "didn't work". */
+    private var userScrolledUp = false
 
     private val refresh = object : Runnable {
         override fun run() {
@@ -90,7 +98,17 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
         // but here the OUTER scroll is the whole screen — no fight with a
         // parent ScrollView).
         val hScroll = HorizontalScrollView(this).apply { addView(logView) }
-        scroll = ScrollView(this).apply { addView(hScroll) }
+        scroll = ScrollView(this).apply {
+            addView(hScroll)
+            setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                if (scrollY < (getChildAt(0).height - height)) {
+                    // content below the fold -> user is reading history
+                    userScrolledUp = true
+                } else if (!canScrollVertically(1)) {
+                    userScrolledUp = false
+                }
+            }
+        }
         root.addView(scroll, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -109,9 +127,13 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
     }
 
     /**
-     * Tail the log file and render. Pin to the bottom when the user is
-     * already at the bottom (live tailing); never yank the view while the
-     * user is scrolled up reading history.
+     * Tail the log file and render. Auto-scroll ONLY on the first render
+     * (initial view) and never after the user has scrolled up: the old
+     * atBottom check re-pinned on every 2s tick — setText() with a shorter
+     * tail momentarily makes canScrollVertically(1) false, so every refresh
+     * snapped to bottom and fought the user's upward scroll. While
+     * [userScrolledUp] is set, new content renders without moving the view;
+     * returning to the bottom clears the flag and live tailing resumes.
      *
      * While the user has an active text selection, the refresh is a no-op:
      * setText() would destroy the selection handles and make copy-paste
@@ -127,9 +149,9 @@ class ServerLogActivity : androidx.activity.ComponentActivity() {
             val tail = if (logFile.exists()) RandomAccessTail.tail(logFile, 64 * 1024) else ""
             val next = tail.ifEmpty { "No log output yet." }
             if (next == logView.text.toString()) return
-            val atBottom = !scroll.canScrollVertically(1)
+            val firstRender = logView.text.isEmpty()
             logView.text = next
-            if (atBottom) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+            if (firstRender || !userScrolledUp) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
         }
     }
 

@@ -1873,14 +1873,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
 /** Bounded tail read: seek near end, return last complete lines.
  *  Internal (not private): shared with ServerLogActivity (same module). */
 internal object RandomAccessTail {
-    fun tail(f: File, maxBytes: Int): String {
+    /** @param maxChars output char cap; UI callers keep the 8000 default,
+     *  agentctl logtail passes maxChars = maxBytes (no silent clipping). */
+    fun tail(f: File, maxBytes: Int, maxChars: Int = 8000): String {
         java.io.RandomAccessFile(f, "r").use { raf ->
             val start = maxOf(0L, raf.length() - maxBytes)
             raf.seek(start)
             val bytes = ByteArray((raf.length() - start).toInt())
             raf.readFully(bytes)
             val text = String(bytes, Charsets.UTF_8)
-            return text.substringAfter("\n").takeLast(8000) // drop partial line, cap chars
+            // Mid-file seek: the first fragment is partial — drop it. Whole-file
+            // read (start == 0): the first line is complete — keep it.
+            val body = if (start > 0L) text.substringAfter("\n") else text
+            return body.takeLast(maxChars)
         }
     }
 }
