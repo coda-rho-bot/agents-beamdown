@@ -350,6 +350,28 @@ class MainActivity : androidx.activity.ComponentActivity() {
      * sides (BoxInsetLayout formula). Side-only padding lets corners clip.
      */
     private fun applyWatchSafeArea(page: View, baseSides: Int, baseTop: Int, baseBottom: Int) {
+        // Eager application: insets dispatch never reaches the content view on
+        // some Wear OS versions/layouts, leaving padding at 0 and the first/
+        // last lines clipped by the round bezel (Harry, Oct 5: title and
+        // privacy line cut off on SM-L310 onboarding). Apply unconditionally
+        // from display metrics + resources.isScreenRound, then let the
+        // insets listener refine if/when it fires.
+        fun safeInset(): Int {
+            val w = resources.displayMetrics.widthPixels
+            val round = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                // Reflection-free best effort for the eager path; the insets
+                // listener below owns the authoritative value on API 30+.
+                resources.configuration.isScreenRound
+            } else false
+            return if (round) (w * 0.146).toInt() else dp(6)
+        }
+
+        fun applyPad() {
+            val inset = safeInset()
+            page.setPadding(inset + baseSides, inset + baseTop, inset + baseSides, inset + baseBottom)
+        }
+
+        applyPad()
         page.setOnApplyWindowInsetsListener { v, insets ->
             val w = resources.displayMetrics.widthPixels
             val round = if (android.os.Build.VERSION.SDK_INT >= 30) insets.isRound else false
@@ -749,7 +771,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             addView(content)
             setBackgroundColor(W.bg)
         }
-        applyWatchSafeArea(scroll, dp(4), dp(6), dp(4))
+        applyWatchSafeArea(scroll, dp(8), dp(6), dp(8))
         setContentView(scroll)
     }
 
