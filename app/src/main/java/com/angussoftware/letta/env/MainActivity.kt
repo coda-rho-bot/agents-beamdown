@@ -779,7 +779,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** Shared onboarding save+start (used by phone and watch variants). */
     private fun saveOnboarding(key: String, env: String) {
-        onboardingShowing = false
         // If the user left the key field empty but a saved key exists, they
         // are renaming only — keep the existing key. (The field pre-fills the
         // saved key, so empty means explicitly cleared; either way the saved
@@ -795,6 +794,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Toast.makeText(this, "Environment name: lowercase letters, digits, - and _ only (max 64 chars)", Toast.LENGTH_LONG).show()
             return
         }
+        onboardingShowing = false // passed validation — leaving onboarding for real
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putString(PREF_KEY, effectiveKey)
             .putString(PREF_ENV, env)
