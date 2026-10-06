@@ -209,7 +209,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** First-run (or reconfigure): Letta API key + environment name. */
     private fun showOnboarding() {
-        onboardingShowing = true
+        // Flag means FRESH-INSTALL onboarding (no key yet) — the only state
+        // key-sync should override. Re-key flow (key already saved) keeps it
+        // false so ambient/screen-off resume never discards half-typed input.
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "").isNullOrBlank()) onboardingShowing = true
         val pad = dp(20)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -672,7 +675,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** Watch onboarding: key + env entry, flat black, round-safe, cancellable. */
     private fun showOnboardingWatch() {
-        onboardingShowing = true
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "").isNullOrBlank()) onboardingShowing = true
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
