@@ -512,7 +512,7 @@ object UpdateManager {
      * re-offered fresh. [clearAvailable] stays the full-reset for when
      * no update is known at all.
      */
-    private fun clearDownload(context: Context) {
+    fun clearDownload(context: Context) {
         val app = context.applicationContext
         val p = prefs(app)
         val id = p.getLong(PREF_DL_ID, -1)
@@ -529,8 +529,16 @@ object UpdateManager {
             .apply()
     }
 
-    /** Enqueue the APK download via DownloadManager. False when no URL known. */
-    fun enqueueDownload(context: Context): Boolean {
+    /**
+     * Enqueue the APK download via DownloadManager. False when no URL known.
+     *
+     * [allowMetered]: a USER-initiated download is explicit consent to spend
+     * data — never hard-lock it on Wi-Fi (field feedback Oct 6: "downloading…
+     * forever" on cellular with no way forward read as a broken app). The
+     * metered guard stays for every NON-interactive path: the overnight
+     * auto-update and feed-triggered prefetches keep allowMetered=false.
+     */
+    fun enqueueDownload(context: Context, allowMetered: Boolean = false): Boolean {
         val app = context.applicationContext
         val p = prefs(app)
         val url = p.getString(PREF_UPDATE_URL, null) ?: return false
@@ -538,10 +546,7 @@ object UpdateManager {
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle("Agents Beamdown $tag")
             .setDescription("App update")
-            // Metered guard (audit fix 2): the overnight auto-update must
-            // never burn cellular data — DownloadManager pauses the download
-            // until an unmetered (wifi) network is available instead.
-            .setAllowedOverMetered(false)
+            .setAllowedOverMetered(allowMetered)
             .setDestinationInExternalFilesDir(app, null, "updates/letta-environment-$tag.apk")
         val id = (app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
         p.edit()

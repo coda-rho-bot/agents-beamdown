@@ -160,6 +160,30 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var updateCard: LinearLayout? = null
     private var updateText: TextView? = null
     private var updateBtn: TextView? = null
+
+    /**
+     * Update-card button (phone + watch share this): user-initiated taps are
+     * explicit consent — download over ANY network. If an earlier enqueue is
+     * sitting PAUSED on the metered guard, re-enqueue unlocked instead of
+     * no-op'ing (the paused request would otherwise keep "waiting for Wi-Fi"
+     * despite the user asking to proceed now).
+     */
+    private fun onUpdateButtonTap() {
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        when {
+            p.getBoolean(UpdateManager.PREF_DL_DONE, false) ->
+                UpdateManager.install(this)
+            p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> {
+                val paused = UpdateManager.downloadPauseReason(this, p.getLong(UpdateManager.PREF_DL_ID, -1)) != null
+                if (paused) {
+                    UpdateManager.clearDownload(this)
+                    UpdateManager.enqueueDownload(this, allowMetered = true)
+                }
+                // else: actively downloading — tick shows progress
+            }
+            else -> UpdateManager.enqueueDownload(this, allowMetered = true)
+        }
+    }
     // Spacer after updateCard — must hide with the card (card is GONE
     // whenever no update is known / a session is running).
     private var updateCardSpacer: View? = null
@@ -521,16 +545,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateText = watchText("", 10.5f, W.textDim).apply {
             setPadding(0, 0, 0, dp(4))
         }
-        updateBtn = watchPill("Download", style = 1) {
-            // Same action routing as the phone card's button.
-            val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-            when {
-                p.getBoolean(UpdateManager.PREF_DL_DONE, false) ->
-                    UpdateManager.install(this@MainActivity)
-                p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> Unit // in-flight; tick shows progress
-                else -> UpdateManager.enqueueDownload(this@MainActivity)
-            }
-        }
+        updateBtn = watchPill("Download", style = 1) { onUpdateButtonTap() }
         watchUpdateRow.addView(updateText)
         watchUpdateRow.addView(updateBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
@@ -1219,14 +1234,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             backgroundTintList = android.content.res.ColorStateList.valueOf(
                 C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
             setTextColor(C.accent)
-            setOnClickListener {
-                val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-                when {
-                    p.getBoolean(UpdateManager.PREF_DL_DONE, false) -> UpdateManager.install(this@MainActivity)
-                    p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> Unit // in-flight; tick shows progress
-                    else -> UpdateManager.enqueueDownload(this@MainActivity)
-                }
-            }
+            setOnClickListener { onUpdateButtonTap() }
         }
         updateCard!!.addView(updateText)
         updateCard!!.addView(updateBtn, LinearLayout.LayoutParams(
