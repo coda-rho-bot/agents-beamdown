@@ -1772,6 +1772,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Release the static delivery callback so it can't hold a destroyed
+        // activity (review follow-up, PR #83): re-registration happens on the
+        // next showOnboarding*, and null-then-fire is a safe no-op.
+        WatchKeySync.onKeyDelivered = null
+    }
+
     private var autostartDone = false
     /** True while an onboarding screen is the active content (key-sync skip check). */
     private var onboardingShowing = false
