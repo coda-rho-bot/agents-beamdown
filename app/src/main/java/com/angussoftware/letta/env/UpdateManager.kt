@@ -553,6 +553,24 @@ object UpdateManager {
         return true
     }
 
+    /**
+     * Why a download is stalled, for honest UI: when DownloadManager has the
+     * request PAUSED (metered guard waiting for Wi-Fi is the common case —
+     * the APK is 347MB and setAllowedOverMetered(false) parks it on
+     * cellular), the card must SAY so instead of "Downloading…" forever.
+     * Null when not paused / row gone.
+     */
+    fun downloadPauseReason(context: Context, id: Long): String? = queryDownload(context, id) { c ->
+        val status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+        if (status != DownloadManager.STATUS_PAUSED) null
+        else when (c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))) {
+            DownloadManager.PAUSED_WAITING_FOR_NETWORK -> "waiting for Wi-Fi"
+            DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "waiting for Wi-Fi"
+            DownloadManager.PAUSED_WAITING_TO_RETRY -> "retrying — check connection"
+            else -> "paused"
+        }
+    }
+
     /** Percent 0..100, or null when the size is unknown / row is gone. */
     fun downloadProgress(context: Context, id: Long): Int? = queryDownload(context, id) { c ->
         val total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))

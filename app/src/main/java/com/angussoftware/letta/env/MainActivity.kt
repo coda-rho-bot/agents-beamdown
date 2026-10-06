@@ -2005,10 +2005,18 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
             UpdateManager.UpdateCardState.DOWNLOADING -> {
                 val pct = UpdateManager.downloadProgress(this, dlId)
+                // Honest stalled states: a PAUSED download (metered guard on
+                // cellular) must not render as fake progress — say what it's
+                // waiting for so the user knows the unblock (join Wi-Fi).
+                val pause = UpdateManager.downloadPauseReason(this, dlId)
                 card.visibility = View.VISIBLE
-                tv.text = if (pct != null) "Downloading $tag — $pct%" else "Downloading $tag…"
+                tv.text = when {
+                    pause != null -> "$tag — $pause (auto-resumes on Wi-Fi)"
+                    pct != null -> "Downloading $tag — $pct%"
+                    else -> "Downloading $tag…"
+                }
                 tv.setTextColor(warn)
-                btn.text = "Downloading…"
+                btn.text = pause ?: "Downloading…"
                 btn.isEnabled = false
             }
             UpdateManager.UpdateCardState.DOWNLOAD -> {
