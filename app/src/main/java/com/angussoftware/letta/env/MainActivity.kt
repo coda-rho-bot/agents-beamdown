@@ -2025,7 +2025,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
                 tv.setTextColor(warn)
                 btn.text = pause ?: "Downloading…"
-                btn.isEnabled = false
+                // PAUSED (metered guard): keep the button LIVE — the tap is
+                // the user's consent to spend data; onUpdateButtonTap clears
+                // + re-enqueues over cellular. Review #89 blocker.
+                btn.isEnabled = pause != null
             }
             UpdateManager.UpdateCardState.DOWNLOAD -> {
                 card.visibility = View.VISIBLE
