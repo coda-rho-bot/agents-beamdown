@@ -209,6 +209,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** First-run (or reconfigure): Letta API key + environment name. */
     private fun showOnboarding() {
+        onboardingShowing = true
         val pad = dp(20)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -671,6 +672,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** Watch onboarding: key + env entry, flat black, round-safe, cancellable. */
     private fun showOnboardingWatch() {
+        onboardingShowing = true
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -777,6 +779,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** Shared onboarding save+start (used by phone and watch variants). */
     private fun saveOnboarding(key: String, env: String) {
+        onboardingShowing = false
         // If the user left the key field empty but a saved key exists, they
         // are renaming only — keep the existing key. (The field pre-fills the
         // saved key, so empty means explicitly cleared; either way the saved
@@ -1718,6 +1721,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Key-sync reconciliation: if the activity is sitting in onboarding
+        // (fresh install) and a key arrives via WatchKeySync while we're
+        // running, the launch-intent just re-fronts this task — no recreate,
+        // no new intent — so the stale onboarding screen would stay up. Any
+        // resume with a key present must leave onboarding behind (same
+        // reconciliation pattern as the v0.4.7 lifecycle fixes).
+        val prefsNow = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (onboardingShowing && !prefsNow.getString(PREF_KEY, "").isNullOrBlank()) {
+            onboardingShowing = false
+            if (isWatch()) showMainWatch() else showMain()
+        }
         handler.post(refresh)
         // Autostart (once per process): MUST run from a resumed/foreground
         // activity — starting the FGS from onCreate (pre-resume) makes the
@@ -1737,6 +1751,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private var autostartDone = false
+    /** True while an onboarding screen is the active content (key-sync skip check). */
+    private var onboardingShowing = false
 
     override fun onPause() {
         super.onPause()
