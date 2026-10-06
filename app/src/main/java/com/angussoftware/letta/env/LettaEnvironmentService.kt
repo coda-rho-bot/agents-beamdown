@@ -1432,7 +1432,11 @@ class LettaEnvironmentService : Service() {
         // statuses carry it (Online/Running/Starting/stopped-transition).
         val updateTag = getSharedPreferences(PREFS, MODE_PRIVATE)
             .getString("update_tag", null)
-        val shownText = if (updateTag.isNullOrEmpty()) text
+        // Skip the suffix on letta-code upgrade statuses — those lines
+        // describe the OTHER update path (npm package, not the APK) and
+        // "stop to update" instruction-mash there is misleading.
+        val upgrading = text.contains("pgrad", ignoreCase = true)
+        val shownText = if (updateTag.isNullOrEmpty() || upgrading) text
             else "$text  ·  $updateTag available — stop to update"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Agents Beamdown — ${envName()}")
@@ -1458,13 +1462,12 @@ class LettaEnvironmentService : Service() {
     }
 
     /** Re-post the notification with the current status line (pref-read in
-     *  buildNotification picks up or drops the update suffix). */
+     *  buildNotification picks up or drops the update suffix). Already
+     *  main-thread (callback posts to main looper). */
     private fun rerenderNotification() {
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            runCatching {
-                val nm = getSystemService(NotificationManager::class.java)
-                nm.notify(NOTIFICATION_ID, buildNotification(lastNotifText))
-            }
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIFICATION_ID, buildNotification(lastNotifText))
         }
     }
 

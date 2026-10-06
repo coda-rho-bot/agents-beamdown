@@ -478,7 +478,6 @@ object UpdateManager {
         val app = context.applicationContext
         val p = prefs(app)
         val hadUpdate = !p.getString(PREF_UPDATE_TAG, null).isNullOrEmpty()
-        if (hadUpdate) notifyStatusRerender()
         val id = p.getLong(PREF_DL_ID, -1)
         if (id != -1L) {
             runCatching {
@@ -494,6 +493,7 @@ object UpdateManager {
             .remove(PREF_DL_TAG)
             .remove(PREF_INSTALL_FIRED_FOR)
             .apply()
+        if (hadUpdate) notifyStatusRerender()
         // Update installed/withdrawn: drop the posted notification and the
         // dedupe state so the NEXT release notifies from scratch.
         clearNotifState(app)
