@@ -14,8 +14,8 @@ android {
         applicationId = "com.angussoftware.letta.env"
         minSdk = 26
         targetSdk = 28
-        versionCode = 32
-        versionName = "0.4.19"
+        versionCode = 33
+        versionName = "0.4.20"
 
         // Self-updater feed auth: the feed is the PUBLIC releases mirror
         // (coda/letta-environment-releases) — unauthenticated fetch is the
