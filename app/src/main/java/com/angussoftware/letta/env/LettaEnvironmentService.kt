@@ -223,6 +223,7 @@ class LettaEnvironmentService : Service() {
         // Self-updater periodic checks ride this already-running foreground
         // service — no new always-running process (spec Sep 30).
         UpdateManager.startPeriodicChecks(this)
+        UpdateManager.onStatusRerender = { rerenderNotification() }
 
         // Stale-status invalidation: an install/kill leaves status.txt claiming
         // "online" from a dead process. On any service start, if no server
@@ -1423,9 +1424,19 @@ class LettaEnvironmentService : Service() {
         } catch (_: Exception) {
             null
         }
+        // Indefinite runners never stop the server, so the idle-only update
+        // card never shows for them. Surface the known update in the ONE
+        // surface they always see: this persistent status notification.
+        // The 30-min feed tick discovers the tag; onUpdateAvailable
+        // re-renders; every buildNotification call reads the pref so all
+        // statuses carry it (Online/Running/Starting/stopped-transition).
+        val updateTag = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getString("update_tag", null)
+        val shownText = if (updateTag.isNullOrEmpty()) text
+            else "$text  ·  $updateTag available — stop to update"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Agents Beamdown — ${envName()}")
-            .setContentText(text)
+            .setContentText(shownText)
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setLargeIcon(largeIcon)
             .setOngoing(true)
@@ -1435,12 +1446,30 @@ class LettaEnvironmentService : Service() {
             .build()
     }
 
+    // Last status text rendered into the notification — lets the update
+    // discovery callback re-render the SAME status with the update suffix
+    // (or without, on clear) without knowing which status line is current.
+    private var lastNotifText: String = "Starting..."
+
     private fun updateNotification(text: String) {
+        lastNotifText = text
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
+    /** Re-post the notification with the current status line (pref-read in
+     *  buildNotification picks up or drops the update suffix). */
+    private fun rerenderNotification() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching {
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.notify(NOTIFICATION_ID, buildNotification(lastNotifText))
+            }
+        }
+    }
+
     override fun onDestroy() {
+        UpdateManager.onStatusRerender = null
         // Review #18 F2/F3 (Angus): Stop must be terminal. Set SHUTDOWN FIRST
         // so the worker's drain loop cannot relaunch. onDestroy also runs for
         // install-kills and system shutdowns — the user-stop MARKER is only

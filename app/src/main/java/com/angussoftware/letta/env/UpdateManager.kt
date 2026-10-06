@@ -107,6 +107,22 @@ object UpdateManager {
     private fun prefs(context: Context) =
         context.getSharedPreferences(LettaEnvironmentService.PREFS, Context.MODE_PRIVATE)
 
+    /**
+     * In-process signal for the FGS to re-render its persistent status
+     * notification: fired whenever the known-update tag CHANGES (new release
+     * discovered by the 30-min tick / on-open check, or cleared on
+     * up-to-date). Same pattern as WatchKeySync.onKeyDelivered (PR #83/#84):
+     * static nullable callback, main-looper posted, nulled by the owner's
+     * teardown. Indefinite runners see the update hint without ever
+     * stopping the server or opening the app.
+     */
+    var onStatusRerender: (() -> Unit)? = null
+    private fun notifyStatusRerender() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            onStatusRerender?.invoke()
+        }
+    }
+
     // ---- pure logic (unit-tested in UpdateManagerTest) -----------------------
 
     /**
@@ -274,8 +290,13 @@ object UpdateManager {
                                 .putString(PREF_UPDATE_URL, rel.apkUrl)
                                 .apply()
                             // First discovery of a new tag → notify promptly
-                            // (don't wait for the next 30-min periodic tick).
-                            if (wasTag != rel.tag) maybeNotify(app)
+                            // (don't wait for the next 30-min periodic tick)
+                            // and re-render the FGS status notification so
+                            // indefinite runners see it in place.
+                            if (wasTag != rel.tag) {
+                                maybeNotify(app)
+                                notifyStatusRerender()
+                            }
                         } else {
                             clearAvailable(app) // up to date — drop stale prompt
                         }
@@ -456,6 +477,8 @@ object UpdateManager {
     fun clearAvailable(context: Context) {
         val app = context.applicationContext
         val p = prefs(app)
+        val hadUpdate = !p.getString(PREF_UPDATE_TAG, null).isNullOrEmpty()
+        if (hadUpdate) notifyStatusRerender()
         val id = p.getLong(PREF_DL_ID, -1)
         if (id != -1L) {
             runCatching {
