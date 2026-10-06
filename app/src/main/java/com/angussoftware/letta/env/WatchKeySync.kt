@@ -2,7 +2,6 @@ package com.angussoftware.letta.env
 
 import android.content.Context
 import android.util.Log
-import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.DataClient
 import com.google.android.gms.wearable.DataEvent
 import com.google.android.gms.wearable.DataEventBuffer
@@ -31,23 +30,28 @@ object WatchKeySync {
     /** Capability the watch app advertises (res/xml/wear_capabilities.xml). */
     const val WATCH_CAPABILITY = "beamdown_watch"
 
+    /** Three states the send button can honestly report. */
+    enum class WatchState { LINKED, CONNECTED_NOT_LINKED, NO_WATCH }
+
     /**
-     * Phone side: is a watch with Beamdown installed currently reachable?
-     * Distinguishes "no watch / no app" from "watch present": DataClient
-     * writes always succeed locally (queued for later sync), so without
-     * this check the send button reports success into the void.
+     * Phone side: probe the real state of the wearable link.
+     *
+     * CapabilityClient answers from cache and only knows apps that already
+     * registered; NodeClient.getConnectedNodes() reports the live GMS Wear
+     * link (BT or network relay) — what DataClient delivery rides on.
+     * A paired-but-unlinked watch returns zero nodes; a DataItem queued
+     * then has no guaranteed carrier, so we treat it as NO_WATCH.
      */
-    fun checkWatchReachable(context: Context, onResult: (Boolean) -> Unit) {
-        val client = Wearable.getCapabilityClient(context)
-        client.getCapability(WATCH_CAPABILITY, CapabilityClient.FILTER_REACHABLE).apply {
-            addOnSuccessListener { cap ->
-                val reachable = cap.nodes.any { it.isNearby }
-                Log.i(TAG, "watch capability: ${cap.nodes.size} node(s), reachable=$reachable")
-                onResult(reachable)
+    fun probeWatch(context: Context, onResult: (WatchState) -> Unit) {
+        Wearable.getNodeClient(context).connectedNodes.apply {
+            addOnSuccessListener { list ->
+                val state = if (list.isEmpty()) WatchState.NO_WATCH else WatchState.LINKED
+                Log.i(TAG, "probe: ${list.size} node(s), nearby=${list.any { it.isNearby }} -> $state")
+                onResult(state)
             }
             addOnFailureListener { e ->
-                Log.w(TAG, "capability check failed: ${e.message}")
-                onResult(false)
+                Log.w(TAG, "node probe failed: ${e.message}")
+                onResult(WatchState.NO_WATCH)
             }
         }
     }

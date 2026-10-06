@@ -988,23 +988,28 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
                 val envName = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ENV, DEFAULT_ENV).orEmpty()
                 text = "Checking watch…"
-                WatchKeySync.checkWatchReachable(this@MainActivity) { reachable ->
-                    if (!reachable) {
-                        runOnUiThread {
+                WatchKeySync.probeWatch(this@MainActivity) { state ->
+                    when (state) {
+                        WatchKeySync.WatchState.NO_WATCH -> runOnUiThread {
                             Toast.makeText(
                                 this@MainActivity,
-                                "No watch with Beamdown found. Install the app on the watch (same APK) and keep it nearby.",
+                                "Watch not connected — check it's on and linked in Galaxy Wearable.",
                                 Toast.LENGTH_LONG
                             ).show()
                             text = "Send key to watch"
                         }
-                        return@checkWatchReachable
-                    }
-                    text = "Sending…"
-                    WatchKeySync.sendKey(this@MainActivity, savedKey, envName) { ok, msg ->
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, if (ok) "Key sent to watch" else msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
-                            text = "Send key to watch"
+                        else -> {
+                            text = "Sending…"
+                            WatchKeySync.sendKey(this@MainActivity, savedKey, envName) { ok, msg ->
+                                runOnUiThread {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        if (ok) "Key sent — the watch will pick it up when its link is live" else msg,
+                                        if (ok) Toast.LENGTH_LONG else Toast.LENGTH_LONG
+                                    ).show()
+                                    text = "Send key to watch"
+                                }
+                            }
                         }
                     }
                 }
