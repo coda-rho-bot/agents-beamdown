@@ -216,7 +216,9 @@ class AgentAccessibilityService : AccessibilityService() {
         //    so text at the equator doesn't bleed into the bezel.
         // 3. Tighter paddings + smaller type on watch-sized screens.
         val isRound = resources.configuration.isScreenRound
-        val small = resources.configuration.smallestScreenWidthDp < 400
+        // sw<340 ≈ watch-class only (Galaxy Watch 7 = 320dp); 360-392dp phone
+        // cover/main displays keep the original phone scale (review F2).
+        val small = isRound || resources.configuration.smallestScreenWidthDp < 340
         val root = android.widget.FrameLayout(this).apply {
             setBackgroundColor(p.bg.withAlpha(0xF0))
         }
@@ -229,10 +231,15 @@ class AgentAccessibilityService : AccessibilityService() {
         }
         val scroller = android.widget.ScrollView(this).apply {
             isVerticalScrollBarEnabled = true
+            // Review F1: no child CENTER gravity (ScrollView clamps scroll to
+            // [0, child.bottom - viewport]; a centered-taller child starts at
+            // negative top → top overflow permanently unreachable). Content's
+            // own CENTER gravity centers when short; fillViewport centers the
+            // viewport background when content is short without clipping.
+            setFillViewport(true)
             addView(content, android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-                android.view.Gravity.CENTER))
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT))
         }
         root.addView(scroller, android.widget.FrameLayout.LayoutParams(
             android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
