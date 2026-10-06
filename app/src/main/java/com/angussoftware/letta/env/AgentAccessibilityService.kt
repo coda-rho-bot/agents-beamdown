@@ -206,36 +206,61 @@ class AgentAccessibilityService : AccessibilityService() {
         // Angus Software Theming tokens (dark set — the overlay scrim is always
         // dark, so the ui mode doesn't apply here).
         val p = EnvPalette.forMode(night = true)
-        val root = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
+        // Round-screen safety (Galaxy Watch 7, 320dp circle): the inscribed
+        // safe rect is ~226dp tall — the full stack (title/agent/desc/duration/
+        // buttons + paddings) exceeds it, which clipped Approve off-screen and
+        // left nothing scrollable (live-reported Oct 6: "cannot scroll down the
+        // request to be able to accept it"). Fixes, in order of effect:
+        // 1. ScrollView wrapper — content always reachable regardless of shape.
+        // 2. Round-insets: on round screens inset horizontally by ~17% of width
+        //    so text at the equator doesn't bleed into the bezel.
+        // 3. Tighter paddings + smaller type on watch-sized screens.
+        val isRound = resources.configuration.isScreenRound
+        val small = resources.configuration.smallestScreenWidthDp < 400
+        val root = android.widget.FrameLayout(this).apply {
             setBackgroundColor(p.bg.withAlpha(0xF0))
-            setPadding(dp(28), dp(40), dp(28), dp(40))
+        }
+        val hPad = if (isRound) dp(30) else dp(28)
+        val vPad = if (isRound) dp(8) else dp(40)
+        val content = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(hPad, vPad, hPad, vPad)
             gravity = android.view.Gravity.CENTER
         }
+        val scroller = android.widget.ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            addView(content, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER))
+        }
+        root.addView(scroller, android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
         val title = android.widget.TextView(this).apply {
             text = "Agent requests phone access"
-            textSize = 22f
+            textSize = if (small) 17f else 22f
             setTextColor(p.textPrimary)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         val who = android.widget.TextView(this).apply {
             text = agent
-            textSize = 16f
+            textSize = if (small) 13f else 16f
             setTextColor(p.accent)
-            setPadding(0, dp(10), 0, 0)
+            setPadding(0, dp(6), 0, 0)
         }
         val body = android.widget.TextView(this).apply {
             text = "“$desc”"
-            textSize = 18f
+            textSize = if (small) 14f else 18f
             setTextColor(p.textPrimary)
-            setPadding(0, dp(16), 0, dp(8))
+            setPadding(0, dp(10), 0, dp(6))
         }
         val dur = android.widget.TextView(this).apply {
             text = "Duration: ${seconds}s — then access revokes automatically. " +
                 "Approving lets the agent see and use this phone for that purpose."
-            textSize = 14f
+            textSize = if (small) 11f else 14f
             setTextColor(p.textSecondary)
-            setPadding(0, 0, 0, dp(24))
+            setPadding(0, 0, 0, dp(14))
         }
         val buttons = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
@@ -252,7 +277,9 @@ class AgentAccessibilityService : AccessibilityService() {
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         buttons.addView(approve, android.widget.LinearLayout.LayoutParams(0,
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(title); root.addView(who); root.addView(body); root.addView(dur); root.addView(buttons)
+        // Buttons attach to the scrollable content — always reachable via
+        // scroll on round screens, visible outright on rectangular phones.
+        content.addView(title); content.addView(who); content.addView(body); content.addView(dur); content.addView(buttons)
         val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
         val lp = android.view.WindowManager.LayoutParams(
             android.view.WindowManager.LayoutParams.MATCH_PARENT,
