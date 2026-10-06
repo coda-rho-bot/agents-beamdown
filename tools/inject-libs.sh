@@ -22,6 +22,7 @@ cp "$R/usr/bin/bash"                                 "$D/libguestbash.so"
 cp "$R/usr/bin/true"                                 "$D/libtrue.so"
 cp "$(dirname "$0")/libsigsys.so"                    "$D/libsigsys.so"
 
+
 # GUARD: the rootfs tar (Aug 21) predates patch 5/6 (Aug 28, uv__close).
 # patch-binaries.py patches the BUILD rootfs, but a build run against a
 # rootfs that never received the patch ships an unpatched libnode.so —
@@ -47,6 +48,18 @@ else:
     sys.exit(f"FATAL: unexpected bytes at libnode+{off:#x}: {cur.hex()} — node build changed, re-derive offset (patch-binaries.py patch 6)")
 PYEOF
 
+# Wear OS mirror (Sep 28 e2e, restored Oct 6): Galaxy Watch 7 (and likely all
+# current Wear OS Samsungs) is a 32-BIT USERLAND on an arm64 KERNEL (armv8l).
+# PackageManager extracts lib* from the dir matching the REPORTED primary ABI
+# (lib/armeabi-v7a -> /lib/arm), and INSTALL_FAILED_NO_MATCHING_ABIS if the
+# APK has no such dir — but the KERNEL happily execs aarch64 ELF, so the same
+# arm64 binaries work; only their extraction slot differs. CI releases since
+# v0.3.2 shipped arm64-v8a only, which FATAL'd on the watch with
+# "lib/arm/libldlnx.so not found — APK injection missing?" the moment the
+# Sep 28 dual-ABI sideload was replaced (keystore reinstall, v0.4.13).
+# Phone is unaffected: it extracts from arm64-v8a as before.
+mkdir -p "$STAGE/lib/armeabi-v7a"
+cp -a "$D/." "$STAGE/lib/armeabi-v7a/"
 # git payloads: AGP's asset-merge gunzips *.gz assets and strips the suffix
 # (git-arm64.tar.gz ships as assets/git-arm64.tar, decompressed). Re-inject
 # the byte-exact .gz files here — the Kotlin staging code and the git wrapper
