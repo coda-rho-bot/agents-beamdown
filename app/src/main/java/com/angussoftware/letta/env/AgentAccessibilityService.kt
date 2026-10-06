@@ -270,7 +270,12 @@ class AgentAccessibilityService : AccessibilityService() {
             setPadding(0, 0, 0, dp(14))
         }
         val buttons = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
+            // Round screens (Harry, Oct 6 live feedback): two side-by-side
+            // buttons at the circle's narrow bottom cap are cramped — stack
+            // vertically so each gets full inset width.
+            orientation = if (small)
+                android.widget.LinearLayout.VERTICAL
+            else android.widget.LinearLayout.HORIZONTAL
         }
         val deny = android.widget.Button(this).apply {
             text = "Deny"
@@ -280,10 +285,22 @@ class AgentAccessibilityService : AccessibilityService() {
             text = "Approve"
             setOnClickListener { dismissConsentOverlay(); onApprove() }
         }
-        buttons.addView(deny, android.widget.LinearLayout.LayoutParams(0,
-            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        buttons.addView(approve, android.widget.LinearLayout.LayoutParams(0,
-            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        // HORIZONTAL: width=0 + weight splits the row. VERTICAL (small/round):
+        // full-width buttons stacked — each gets the full content width in the
+        // narrow bottom cap of the circle.
+        if (small) {
+            buttons.addView(deny, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT))
+            buttons.addView(approve, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT))
+        } else {
+            buttons.addView(deny, android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            buttons.addView(approve, android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
         // Buttons attach to the scrollable content — always reachable via
         // scroll on round screens, visible outright on rectangular phones.
         content.addView(title); content.addView(who); content.addView(body); content.addView(dur); content.addView(buttons)
