@@ -294,7 +294,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT))
             buttons.addView(approve, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT))
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f).apply { topMargin = dp(6) }) // review nit: inter-button breathing
         } else {
             buttons.addView(deny, android.widget.LinearLayout.LayoutParams(0,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
