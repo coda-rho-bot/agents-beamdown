@@ -22,6 +22,22 @@ import com.google.android.gms.wearable.Wearable
  */
 object WatchKeySync {
     const val TAG = "WatchKeySync"
+
+    /**
+     * In-process delivery signal: fired by the listener when a key lands.
+     * The listener service and MainActivity share this process, so an
+     * already-RESUMED onboarding screen can be notified directly — the
+     * onResume reconcile only fires when the activity was paused, which
+     * is exactly the foreground case that silently missed syncs before.
+     * Dependency-free callback, main-thread posted (listener runs on its
+     * service thread; UI must mutate on main).
+     */
+    var onKeyDelivered: (() -> Unit)? = null
+    fun notifyKeyDelivered() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            onKeyDelivered?.invoke()
+        }
+    }
     const val KEY_PATH = "/beamdown_key_sync"
     const val KEY_FIELD = "api_key"
     const val ENV_FIELD = "env_name"
@@ -101,6 +117,7 @@ class WatchKeySyncListenerService : com.google.android.gms.wearable.WearableList
                     .putString(LettaEnvironmentService.PREF_ENV, env.ifEmpty { LettaEnvironmentService.DEFAULT_ENV })
                     .apply()
                 Log.i(WatchKeySync.TAG, "key received from phone (env=${env.ifEmpty { "default" }})")
+                WatchKeySync.notifyKeyDelivered()
                 // If the app is sitting in onboarding (fresh install flow the
                 // key sync is meant to skip), bring it forward so the user
                 // sees the main screen instead of a stale key prompt.

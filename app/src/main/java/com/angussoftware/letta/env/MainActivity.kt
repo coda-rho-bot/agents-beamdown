@@ -209,6 +209,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** First-run (or reconfigure): Letta API key + environment name. */
     private fun showOnboarding() {
+        observeKeySyncForOnboarding()
         // Flag means FRESH-INSTALL onboarding (no key yet) — the only state
         // key-sync should override. Re-key flow (key already saved) keeps it
         // false so ambient/screen-off resume never discards half-typed input.
@@ -675,6 +676,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     /** Watch onboarding: key + env entry, flat black, round-safe, cancellable. */
     private fun showOnboardingWatch() {
+        observeKeySyncForOnboarding()
         if (getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "").isNullOrBlank()) onboardingShowing = true
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val content = LinearLayout(this).apply {
@@ -781,6 +783,23 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     /** Shared onboarding save+start (used by phone and watch variants). */
+    /**
+     * While an onboarding screen is up, watch for a key delivered by sync.
+     * The onResume reconcile catches the paused case; this catches the
+     * FOREGROUND case — activity already resumed, no lifecycle callback
+     * will ever fire when the launch-intent re-fronts the task.
+     */
+    private fun observeKeySyncForOnboarding() {
+        WatchKeySync.onKeyDelivered = {
+            if (onboardingShowing &&
+                !getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_KEY, "").isNullOrBlank()
+            ) {
+                onboardingShowing = false
+                if (isWatch()) showMainWatch() else showMain()
+            }
+        }
+    }
+
     private fun saveOnboarding(key: String, env: String) {
         // If the user left the key field empty but a saved key exists, they
         // are renaming only — keep the existing key. (The field pre-fills the
