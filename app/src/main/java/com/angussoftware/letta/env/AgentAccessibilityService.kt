@@ -16,7 +16,6 @@ import java.io.OutputStream
 import java.net.ServerSocket
 import android.net.LocalServerSocket
 import android.net.LocalSocket
-import android.system.Os
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
 
@@ -97,7 +96,7 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     @Volatile private var pool: ExecutorService = Executors.newCachedThreadPool()
-    @Volatile private var localServer: LocalServerSocket? = null
+    private val socketLifecycle = SocketLifecycle(AndroidSocketBinder()) { log(it) }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -108,8 +107,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         instance = null
-        runCatching { localServer?.close() }
-        localServer = null // allow restart in the same process (a11y toggle)
+        socketLifecycle.shutdown(java.io.File(filesDir, "agentctl.sock"))
         pool.shutdownNow()
         pool = Executors.newCachedThreadPool() // fresh pool for a restart
         super.onDestroy()
@@ -130,46 +128,30 @@ class AgentAccessibilityService : AccessibilityService() {
         // Replaces the old TCP loopback listener, whose "same-uid" reflection
         // check could never read a peer uid on Android (no such field on
         // java.net.Socket) — the gate was structurally fail-open.
-        if (localServer != null) return
+        //
+        // Oct 7 v0.4.27: lifecycle moved to SocketLifecycle — single-owner
+        // bind, adopt-if-live, unlink-orphan-recovery. Fixes the zombie-inode
+        // race where concurrent onServiceConnected binds left a bound-but-
+        // unnamed socket and agentctl died with ENOENT until reinstall.
         pool.execute {
-            // Self-heal loop (Oct 7 live finding): a single swallowed bind
-            // failure (stale socket held by a dying process, transient ENOENT
-            // on filesDir) left the channel dead until a manual a11y toggle.
-            // Retry forever with backoff; every failure is logged so the gap
-            // is visible in a11y.log instead of silent.
-            var backoffMs = 1000L
-            while (localServer == null && instance != null) {
-                try {
-                    val sockFile = java.io.File(filesDir, "agentctl.sock")
-                    sockFile.delete() // stale socket from a previous process
-                    val ss = LocalServerSocket(sockFile.absolutePath)
-                    localServer = ss
-                    runCatching { Os.chmod(sockFile.absolutePath, 384 /* 0600 octal — owner rw only */) } // owner-only, defense in depth
-                    backoffMs = 1000L
-                    log("agentctl socket up (unix): ${sockFile.absolutePath}")
-                    while (true) {
-                        val client = ss.accept()
-                        // Defense-in-depth: verify peer uid even though the 600
-                        // socket file already blocks other apps.
-                        val peerOk = runCatching {
-                            client.peerCredentials?.uid == android.os.Process.myUid()
-                        }.getOrDefault(false)
-                        if (!peerOk) {
-                            runCatching { client.close() }; continue
-                        }
-                        pool.execute { serveLocal(client) }
-                    }
-                } catch (e: Exception) {
-                    // socket closed (service going down — instance==null exits
-                    // the loop) or bind failure (retry with backoff)
-                    if (instance == null) break
-                    log("agentctl socket bind failed (${e.javaClass.simpleName}: ${e.message}) — retry in ${backoffMs}ms")
-                    runCatching { localServer?.close() }
-                    localServer = null
-                    runCatching { Thread.sleep(backoffMs) }
-                    backoffMs = (backoffMs * 2).coerceAtMost(30000L)
-                }
+            socketLifecycle.bindOrTakeOver<LocalServerSocket>(
+                java.io.File(filesDir, "agentctl.sock"),
+                onBound = { ss -> serveAcceptLoop(ss) },
+                isAlive = { instance != null },
+            )
+        }
+    }
+
+    /** Accept loop for a bound server. Runs on the binding worker thread; exits on close. */
+    private fun serveAcceptLoop(ss: LocalServerSocket) {
+        while (instance != null) {
+            val client = try { ss.accept() } catch (_: Exception) { break }
+            // Defense-in-depth: verify peer uid even though the 600
+            // socket file already blocks other apps.
+            if (!client.peerUidMatches()) {
+                runCatching { client.close() }; continue
             }
+            pool.execute { serveLocal(client) }
         }
     }
 

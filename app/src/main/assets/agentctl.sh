@@ -42,7 +42,18 @@ AGENT_NAME="${AGENT_NAME:-Letta agent}"
 SOCK="${AGENTCTL_SOCK:-/data/data/com.angussoftware.letta.env/files/agentctl.sock}"
 
 send() {  # send() <<< one line of JSON (unix socket, app-uid only)
+    if [ ! -S "$SOCK" ]; then
+        echo "agentctl: socket missing at $SOCK" >&2
+        echo "  - is the Agents Beamdown app installed and its accessibility service ON?" >&2
+        echo "  - if it just updated or restarted, the socket self-heals within seconds — retry" >&2
+        return 1
+    fi
     printf '%s\n' "$1" | /system/bin/toybox nc -U "$SOCK" 2>/dev/null
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "agentctl: transport failed (nc rc=$rc) — server may be restarting; retry shortly" >&2
+    fi
+    return $rc
 }
 
 case "${1:-help}" in
