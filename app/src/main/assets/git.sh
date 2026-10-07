@@ -28,8 +28,29 @@ set -u
 DX_FILES="${DX_FILES:-/data/user/0/com.angussoftware.letta.env/files}"
 
 # --- primary: static ELF chain -------------------------------------------------
-if [ -x "$DX_FILES/bin/git-elf" ] && [ -x "$DX_FILES/gc-shim/git-remote-https" ]; then
+# Payload self-heal (Oct 7): git-elf execs $ROOTFS/usr/bin/git as a GLIBC
+# PROGRAM (loader invocation) — the path must hold the real Debian ELF. A
+# wiped/corrupt/script-wrapped payload made the loader fail BEFORE this
+# wrapper's own (fallback-only) payload install, so check HERE, in the
+# primary path, and extract the staged tarball if the ELF is not present.
+# ELF magic check: first 4 bytes 0x7F 'E' 'L' 'F' (a #! wrapper fails it).
+is_elf() { [ -f "$1" ] && [ "$(head -c4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
+if [ ! -x "$DX_FILES/bin/git-elf" ] || [ ! -x "$DX_FILES/gc-shim/git-remote-https" ]; then
+    : # primary chain incomplete — fall through to proot fallback below
+elif is_elf "$DX_FILES/rootfs/usr/bin/git"; then
     exec "$DX_FILES/bin/git-elf" "$@"
+else
+    # payload missing or non-ELF — restore from the staged tarball (offline)
+    # before exec'ing the chain. Never write a script at that path: the glibc
+    # loader cannot exec scripts (live-verified Oct 7, PR #112 closed on it).
+    if [ -f "$DX_FILES/git-arm64.tar.gz" ]; then
+        tar -xzf "$DX_FILES/git-arm64.tar.gz" -C "$DX_FILES/rootfs" \
+            || die "git payload corrupt (primary path) — removed staged copy will re-download on next run"
+        is_elf "$DX_FILES/rootfs/usr/bin/git" \
+            || die "git payload still non-ELF after extract"
+        exec "$DX_FILES/bin/git-elf" "$@"
+    fi
+    # no staged tarball — fall through to the download-based paths below
 fi
 
 # --- fallback: proot rootfs ----------------------------------------------------

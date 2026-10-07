@@ -1297,6 +1297,44 @@ class LettaEnvironmentService : Service() {
         }
         log("git ELF chain installed (git-elf, gc-shim, dnsport.so, dns-forwarder.js)")
 
+        // git payload resilience (Oct 7): git-elf execs rootfs/usr/bin/git as
+        // a GLIBC PROGRAM (loader invocation) — it must be the real Debian
+        // ELF, never a shell script, and never absent. Three observed failure
+        // shapes: (a) stale v0.2.7-era ELF (wrong glibc, cannot load);
+        // (b) payload missing entirely after reinstall (rootfs.tar does not
+        // carry usr/bin/git — the payload asset does); (c) a wrapper script
+        // left at the path by a field hotfix breaks git-elf with "invalid
+        // ELF header". The harness's shared-memory sync execs git by this
+        // ABSOLUTE path, so any bad state here gates ALL Bash/Monitor calls
+        // in on-device sessions. Restore the payload whenever the path is
+        // missing or not a real ELF: staged tarball first (offline-safe).
+        val rootfsGit = File(rootfsDir, "usr/bin/git")
+        runCatching {
+            val needsRestore = !rootfsGit.exists() || rootfsGit.inputStream().use {
+                // ELF magic check: 0x7F 'E' 'L' 'F'. A #! wrapper or zero-byte
+                // file fails this and gets restored.
+                val magic = ByteArray(4)
+                it.read(magic) == 4 && magic[0] == 0x7F.toByte() &&
+                    magic[1] == 'E'.code.toByte() && magic[2] == 'L'.code.toByte() && magic[3] == 'F'.code.toByte()
+            }.not()
+            if (needsRestore) {
+                val tarball = File(filesDir, "git-arm64.tar.gz")
+                if (tarball.exists()) {
+                    val p = ProcessBuilder("tar", "-xzf", tarball.absolutePath, "-C", rootfsDir.absolutePath)
+                        .redirectErrorStream(true).start()
+                    val out = p.inputStream.bufferedReader().readText()
+                    val rc = p.waitFor()
+                    if (rc == 0 && rootfsGit.exists()) {
+                        log("git payload restored from staged tarball (was: missing or non-ELF)")
+                    } else {
+                        log("git payload tarball extract failed (rc=$rc): ${out.take(200)}")
+                    }
+                } else {
+                    log("git payload needs restore but no staged tarball — wrapper self-heal will download")
+                }
+            }
+        }.onFailure { log("git payload resilience check failed: ${it.message}") }
+
         // agentctl: agent-side client for the accessibility command channel
         // (tap/swipe/text/screen-tree) + am/pm/notify passthroughs. Always
         // rewrite — same policy as dx. Source: app/src/main/assets/agentctl.sh.
