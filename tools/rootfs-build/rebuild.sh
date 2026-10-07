@@ -3,8 +3,8 @@ set -e
 B=/tmp/zfold-build
 LC=$B/rootfs/usr/local/lib/node_modules/@letta-ai/letta-code
 cd $B
-echo "== 1. install letta-code 0.30.27 (pinned, engines forced) =="
-npm install -g --prefix $B/rootfs/usr/local --ignore-scripts --force @letta-ai/letta-code@0.30.27 2>&1 | tail -1
+echo "== 1. install letta-code 0.34.4 (pinned, engines forced) =="
+npm install -g --prefix $B/rootfs/usr/local --ignore-scripts --force @letta-ai/letta-code@0.34.4 2>&1 | tail -1
 echo "== 2. swap platform packages to arm64 =="
 rm -rf $LC/node_modules/@img/sharp-linux-x64 $LC/node_modules/@img/sharp-libvips-linux-x64 $LC/node_modules/@vscode/ripgrep-linux-x64
 cd $B/swap
