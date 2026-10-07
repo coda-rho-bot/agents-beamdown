@@ -334,6 +334,14 @@ object UpdateManager {
                 maybeCheckAsync(app)
                 maybeAutoInstall(app)
                 maybeNotify(app)
+                // Watch heartbeat (Oct 7): re-publish cross-device status each
+                // tick so the phone's Watch card reflects this device even
+                // while its screen is off. publishStatus self-guards: phone
+                // side skips (it's the listener), no-link writes fail silently.
+                if (app.packageManager.hasSystemFeature(
+                        android.content.pm.PackageManager.FEATURE_WATCH)) {
+                    runCatching { WatchStatusSync.publishStatus(app) }
+                }
             }
         }.apply { isDaemon = true }.start()
     }

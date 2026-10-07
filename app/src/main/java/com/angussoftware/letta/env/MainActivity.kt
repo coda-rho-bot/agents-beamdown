@@ -27,6 +27,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.angussoftware.letta.env.BuildConfig
+import com.google.android.gms.wearable.Wearable
 import java.io.File
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -205,6 +206,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
     // Watch update chip: same info, under the status hero (round layout —
     // the phone status card doesn't exist there).
     private var watchUpdateChip: TextView? = null
+    // Phone-side watch card (Oct 7): cross-device awareness — probe state,
+    // watch-reported status, "Update watch" nudge. Null on watch/onboarding.
+    private var watchCard: LinearLayout? = null
+    private var watchCardTitle: TextView? = null
+    private var watchCardText: TextView? = null
+    private var watchCardBtn: TextView? = null
+    // Cached probe + status results (set off-main; read on render).
+    @Volatile private var watchLinkState: WatchKeySync.WatchState? = null
+    @Volatile private var watchStatusJson: org.json.JSONObject? = null
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -226,6 +236,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
             // Service start deferred to onResume (foreground) — starting the
             // FGS from onCreate crashes on One UI pre-resume (Sep 26).
             if (isWatch()) showMainWatch() else showMain()
+        }
+        // Cross-device status (Oct 7): phone re-renders the Watch card when
+        // the watch publishes; watch re-publishes on every UI signal (cheap).
+        WatchStatusSync.onStatusChanged = {
+            if (!isWatch()) renderWatchCard() else WatchStatusSync.publishStatus(this)
         }
     }
 
@@ -1095,6 +1110,51 @@ class MainActivity : androidx.activity.ComponentActivity() {
         root.addView(actionCard)
         root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
 
+        // ---- watch card (phone only): cross-device awareness (Oct 7) ----
+        // The phone never knew the watch existed outside "Send key to watch"
+        // — updates flowed independently and the watch's only update surface
+        // was its own screen. Card shows: setup guidance (no watch paired),
+        // or live watch status + "Update watch" (nudges the watch to check
+        // + foreground its update card). All views held as fields; the 2s
+        // tick re-renders via renderWatchCard().
+        if (!isWatch()) {
+            watchCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = card()
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+            }
+            watchCardTitle = TextView(this).apply {
+                text = "Watch"
+                textSize = 13f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                setTextColor(C.textSecondary)
+            }
+            watchCardText = TextView(this).apply {
+                text = "Checking for watch…"
+                textSize = 14f
+                setTextColor(C.textPrimary)
+            }
+            watchCardBtn = Button(this).apply {
+                textSize = 14f
+                backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+                setTextColor(C.accent)
+                setOnClickListener { onWatchCardButtonTap() }
+            }
+            watchCard?.addView(watchCardTitle)
+            watchCard?.addView(watchCardText)
+            watchCard?.addView(
+                watchCardBtn,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT))
+            applyCardSpacing(watchCard!!, 0)
+            root.addView(watchCard)
+            root.addView(View(this), LinearLayout.LayoutParams(1, dp(10)))
+            // Probe immediately on build; renderWatchCard (2s tick) keeps it live.
+            probeWatchStatus()
+        }
+
         // ---- phone-control setup card (accessibility off = agent can't drive UI) ----
         val a11yEnabled = isA11yEnabled()
         // Held as fields so the 2s refresh tick can live-update the card
@@ -1819,6 +1879,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Watch: re-publish status whenever the app comes forward — the
+        // phone's Watch card goes stale while the watch screen is off.
+        if (isWatch()) WatchStatusSync.publishStatus(this)
         // Key-sync reconciliation: if the activity is sitting in onboarding
         // (fresh install) and a key arrives via WatchKeySync while we're
         // running, the launch-intent just re-fronts this task — no recreate,
@@ -1935,6 +1998,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
             // recolor for upgrade prompts on phone; watch stays neutral)
             renderVersionLine()
             renderUpdateCard()
+            // Watch card: re-render from cached state each tick; the probe
+            // itself is throttled (30s) inside probeWatchStatus. Also probe
+            // when the status listener signals a fresh watch publish.
+            if (!isWatch()) {
+                renderWatchCard()
+                probeWatchStatus()
+            }
             // Battery banner: re-evaluated each tick; clears itself when granted.
             // Phone-control card: live state each tick (grant/revoke reflects in 2s).
             // Watch layout has neither (nulls) — WearOS ignores the exemption
@@ -2125,6 +2195,116 @@ class MainActivity : androidx.activity.ComponentActivity() {
         // leaves an orphaned 10dp spacer (double gap at that position).
         updateCardSpacer?.visibility = card.visibility
         renderUpdateChip(tag, idle, dlId != -1L || dlDone)
+    }
+
+    /**
+     * Phone-side Watch card (Oct 7): probe the wearable link (cheap, cached
+     * 30s) and ask the watch to re-publish its status. Off-main; results land
+     * in [watchLinkState] / [watchStatusJson] and the 2s tick renders them.
+     */
+    private fun probeWatchStatus() {
+        val lastProbe = watchLastProbeAt
+        if (System.currentTimeMillis() - lastProbe < 30_000 && watchLinkState != null) return
+        watchLastProbeAt = System.currentTimeMillis()
+        Thread {
+            val state = try {
+                var result: WatchKeySync.WatchState? = null
+                val latch = java.util.concurrent.CountDownLatch(1)
+                WatchKeySync.probeWatch(this) { s ->
+                    result = s
+                    latch.countDown()
+                }
+                latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                result
+            } catch (_: Exception) { null }
+            if (state != null) {
+                watchLinkState = state
+                if (state == WatchKeySync.WatchState.LINKED) {
+                    // Linked: ask for fresh status + read the last published one.
+                    WatchStatusSync.requestStatus(this)
+                    watchStatusJson = WatchStatusSync.parseStatusBlocking(
+                        Wearable.getDataClient(this))
+                } else {
+                    watchStatusJson = null
+                }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+    @Volatile private var watchLastProbeAt = 0L
+
+    /** Render the Watch card from cached probe + status (2s tick + onStatusChanged). */
+    private fun renderWatchCard() {
+        val card = watchCard ?: return
+        val tv = watchCardText ?: return
+        val btn = watchCardBtn ?: return
+        when (watchLinkState) {
+            null -> {
+                tv.text = "Checking for watch…"
+                tv.setTextColor(C.textSecondary)
+                btn.visibility = View.GONE
+            }
+            WatchKeySync.WatchState.NO_WATCH -> {
+                // Empty-state setup guidance (Harry, Oct 7: "OOBE empty state
+                // like 'you can also connect your WearOS watch'").
+                tv.text = "No watch connected.\n" +
+                    "Agents Beamdown also runs on your Wear OS watch — install it there " +
+                    "(download page) and pair via Galaxy Wearable to manage it from here."
+                tv.setTextColor(C.textSecondary)
+                btn.visibility = View.VISIBLE
+                btn.text = "Download page"
+                btn.isEnabled = true
+            }
+            WatchKeySync.WatchState.LINKED, WatchKeySync.WatchState.CONNECTED_NOT_LINKED -> {
+                val json = watchStatusJson
+                if (json == null) {
+                    tv.text = "Watch connected — waiting for status…\n" +
+                        "(Open the watch app once if this doesn't resolve.)"
+                    tv.setTextColor(C.textSecondary)
+                    btn.visibility = View.VISIBLE
+                    btn.text = "Refresh"
+                    btn.isEnabled = true
+                } else {
+                    val v = json.optString(WatchStatusSync.FIELD_APP_VERSION, "?")
+                    val updateTag = json.optString(WatchStatusSync.FIELD_UPDATE_TAG, null)
+                    val online = json.optBoolean(WatchStatusSync.FIELD_ENV_ONLINE, false)
+                    val line1 = if (online) "Watch: online (v$v)" else "Watch: offline (v$v)"
+                    if (updateTag != null && updateTag.isNotEmpty()) {
+                        tv.text = "$line1\n$updateTag available — update from the watch."
+                        tv.setTextColor(0xFFFBBF24.toInt())
+                        btn.visibility = View.VISIBLE
+                        btn.text = "Update watch"
+                        btn.isEnabled = true
+                    } else {
+                        tv.text = line1 + "\nUp to date."
+                        tv.setTextColor(C.textPrimary)
+                        btn.visibility = View.VISIBLE
+                        btn.text = "Check for updates"
+                        btn.isEnabled = true
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Watch card button: context-dependent — "Download page" (no watch),
+     * "Refresh" (waiting for status), "Update watch" (update known — nudge),
+     * "Check for updates" (current — nudge anyway; harmless force-check).
+     */
+    private fun onWatchCardButtonTap() {
+        when (watchLinkState) {
+            WatchKeySync.WatchState.NO_WATCH -> openExternalUrl(FeedbackLinks.DOWNLOAD_URL)
+            WatchKeySync.WatchState.LINKED, WatchKeySync.WatchState.CONNECTED_NOT_LINKED -> {
+                Toast.makeText(this, "Nudged the watch — it will check and open its update card.",
+                    Toast.LENGTH_LONG).show()
+                Thread { WatchStatusSync.sendUpdateNudge(this) }
+                    .apply { isDaemon = true }.start()
+                // Refresh status a few seconds after the nudge (watch publishes
+                // in response) so the card converges without a manual re-probe.
+                handler.postDelayed({ probeWatchStatus() }, 5_000)
+            }
+            null -> probeWatchStatus()
+        }
     }
 
     /**

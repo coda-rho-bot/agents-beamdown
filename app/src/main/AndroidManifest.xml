@@ -170,6 +170,20 @@
                 <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_key_sync" />
             </intent-filter>
         </service>
+        <!-- Watch↔phone status heartbeat + update nudge (WatchStatusSync,
+             Oct 7): watch publishes /beamdown_watch_status, phone listens;
+             phone sends req/nudge, watch listens. Same DATA_CHANGED
+             mechanism as key sync — separate service, separate paths. -->
+        <service
+            android:name=".WatchStatusSyncListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_watch_status" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_watch_status_req" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/beamdown_watch_update_nudge" />
+            </intent-filter>
+        </service>
             <!-- Watch↔phone discovery for key sync (WatchKeySync): the watch
              advertises this capability; the phone checks for a reachable
              node before sending instead of a false-success toast. -->
