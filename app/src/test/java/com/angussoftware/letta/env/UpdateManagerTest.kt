@@ -283,7 +283,6 @@ class UpdateManagerTest {
             UpdateManager.FREQ_ORDER
         )
     }
-}
 
     // ---- install intent (chooser-hijack guard) --------------------------------
     // Oct 7 live finding: a generic ACTION_VIEW + APK MIME intent let file
@@ -311,3 +310,4 @@ class UpdateManagerTest {
             installBlock.contains("Intent(Intent.ACTION_VIEW)")
         )
     }
+}
