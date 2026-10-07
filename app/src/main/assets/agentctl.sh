@@ -4,7 +4,11 @@
 # Talks to the app's local TCP socket (127.0.0.1:8765). One JSON command per
 # invocation; response JSON on stdout. Same-uid only: the socket rejects other apps.
 #
-# Commands (see AgentAccessibilityService.handle):
+# Commands (canonical live index: agentctl commands; full trust picture:
+#   agentctl access — filesystem probes, consent classes, session rules).
+# Consent classes: UNGATED (no consent), GRANT-IS-CONSENT (health/location
+# permission grant IS consent), SESSION-GATED (needs approved overlay),
+# CLIENT-LOCAL (runs here in the shell — am/pm/keyevent/notify).
 #   agentctl ping
 #   agentctl tap <x> <y>            (BLOCKED on One UI 7 — gesture filter; use click)
 #   agentctl longpress <x> <y>      (BLOCKED on One UI 7 — use click + a11y)
@@ -58,6 +62,7 @@ case "${1:-help}" in
     status)    send '{"cmd":"status"}' ;;
     commands)  send '{"cmd":"commands"}' ;;
     capabilities) send '{"cmd":"capabilities"}' ;;
+    access)    send '{"cmd":"access"}' ;;
     health)
         SUB="${2:-status}"
         case "$SUB" in

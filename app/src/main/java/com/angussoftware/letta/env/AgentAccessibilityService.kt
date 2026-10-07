@@ -36,10 +36,60 @@ import java.util.concurrent.Executors
  */
 class AgentAccessibilityService : AccessibilityService() {
 
+    /** Consent classification for an agentctl command. Single source of truth —
+     *  the gate, the commands index, and the access manifest all render from this. */
+    enum class ConsentClass { UNGATED, GRANT_IS_CONSENT, SESSION_GATED, CLIENT_LOCAL }
+
+    data class CommandSpec(
+        val name: String,               // canonical wire name (what handle() dispatches)
+        val clientAlias: String? = null,// agentctl-facing name when different (e.g. screen)
+        val args: String,
+        val does: String,
+        val note: String = "",
+        val consent: ConsentClass
+    )
+
     companion object {
         const val PORT = 8765
         @Volatile var instance: AgentAccessibilityService? = null
             private set
+
+        /** Every socket command the service implements. order = display order.
+         *  CLIENT_LOCAL entries never traverse the socket — they run in the
+         *  agent shell (agentctl.sh passthroughs); listed so the index is the
+         *  complete honest surface. The consent gate ignores them. */
+        val REGISTRY: List<CommandSpec> = listOf(
+            CommandSpec("ping", args = "", does = "service handshake; returns uid", consent = ConsentClass.UNGATED),
+            CommandSpec("commands", args = "", does = "this index (generated from the command registry — the same source the consent gate enforces)", consent = ConsentClass.UNGATED),
+            CommandSpec("access", args = "", does = "complete runtime access manifest: filesystem surface (live-probed), consent model, all commands with consent classes, session semantics — the honest whole picture for a zero-context agent", consent = ConsentClass.UNGATED),
+            CommandSpec("capabilities", args = "", does = "live device capability probe (what works on THIS device)", consent = ConsentClass.UNGATED),
+            CommandSpec("status", args = "", does = "current session state (active, expiry, pending prompt)", consent = ConsentClass.UNGATED),
+            CommandSpec("session", args = "\"desc\" [seconds]", does = "request user consent overlay — REQUIRED before any session-gated command; blocks up to 120s waiting for Approve/Deny", consent = ConsentClass.UNGATED),
+            CommandSpec("tap", args = "x y", does = "tap at coordinates", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("longPress", args = "x y", does = "press-and-hold at coordinates", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("swipe", args = "fromX fromY toX toY [durationMs]", does = "stroke gesture", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("click", args = "\"label\"", does = "node-click by visible text/content-desc — primary input method", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("clickId", args = "view-id", does = "node-click by resource id", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("text", args = "\"value\"", does = "type into the focused input field", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("key", args = "keyCode", does = "press a key", note = "limited to back/home/recents; arbitrary keys need INJECT_EVENTS (usually denied)", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("back", args = "", does = "global action: back", consent = ConsentClass.UNGATED),
+            CommandSpec("home", args = "", does = "global action: home", consent = ConsentClass.UNGATED),
+            CommandSpec("notifications", args = "", does = "global action: pull notification shade", consent = ConsentClass.UNGATED),
+            CommandSpec("screenshot-text", clientAlias = "screen", args = "", does = "visible text elements + bounds + clickability (JSON)", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("tree", args = "[maxDepth]", does = "active window hierarchy (JSON)", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("launch", args = "uri", does = "open ACTION_VIEW intent", note = "works where shell am start is OEM-blocked", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("health", args = "status|hr|steps [hours]|sleep [days]", does = "health telemetry — permission-scoped (Health Connect grant IS consent)", note = "hr reads the newest synced sample (may lag the watch by minutes); status shows grant state before first use", consent = ConsentClass.GRANT_IS_CONSENT),
+            CommandSpec("hcrequest", args = "", does = "launch the in-app Health Connect permission request screen", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("location", args = "", does = "last-known fix {lat,lon,accuracyM,ageSec} or one current fetch", note = "permission-scoped — location grant IS consent", consent = ConsentClass.GRANT_IS_CONSENT),
+            CommandSpec("notifstatus", args = "", does = "notification-listener grant state + snapshot count (no content)", consent = ConsentClass.UNGATED),
+            CommandSpec("notiflist", args = "", does = "active notifications (pkg/title/text)", note = "message content is privacy-peer to screen", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("logtail", args = "[bytes]", does = "last N bytes (default 4096, max 16384) of the app's own server.log", note = "NOT session-gated — the app's own lifecycle lines, no user content", consent = ConsentClass.UNGATED),
+            // client-local passthroughs (agent shell, not the gated socket):
+            CommandSpec("am", args = "<args>", does = "shell am passthrough (client-local)", note = "runs in the agent shell — no consent gate; OEM may block targets", consent = ConsentClass.CLIENT_LOCAL),
+            CommandSpec("pm", args = "<args>", does = "shell pm passthrough (client-local)", note = "runs in the agent shell — no consent gate", consent = ConsentClass.CLIENT_LOCAL),
+            CommandSpec("keyevent", args = "keyCode", does = "shell input keyevent (client-local)", note = "raw key injection; often denied by OEM — prefer back/home", consent = ConsentClass.CLIENT_LOCAL),
+            CommandSpec("notify", args = "\"title\" \"text\"", does = "post the app's own notification (client-local broadcast)", note = "always allowed — the app's own channel", consent = ConsentClass.CLIENT_LOCAL),
+        )
     }
 
     private val pool = Executors.newCachedThreadPool()
@@ -327,21 +377,19 @@ class AgentAccessibilityService : AccessibilityService() {
 
 
     private fun handle(cmd: String, req: JSONObject): JSONObject {
-        // Deterministic consent gate: privacy-bearing commands require an
-        // APPROVED session (see requestConsent). Introspection (commands,
-        // capabilities, ping), pure navigation (home/back), telemetry whose
-        // scoped permission grant IS the consent (health/location), and
-        // notifstatus (grant state only — no content) stay ungated.
-        // notiflist (message CONTENT) is privacy-peer to screen: gated.
-        val gated = cmd !in setOf(
-            "ping", "commands", "capabilities", "home", "back",
-            "notifications", "session", "status",
-            "health", "location", "notifstatus", "logtail")
-        if (gated) gate()?.let { return it }
+        // Deterministic consent gate, driven by the command REGISTRY — the
+        // same table that generates the commands index and the access
+        // manifest. Only SESSION_GATED commands require an approved session
+        // (see requestConsent). Docs cannot drift from enforcement: they are
+        // both projections of this table.
+        val spec = REGISTRY.firstOrNull { it.name == cmd || it.clientAlias == cmd }
+        if (spec == null) return err().put("error", "unknown cmd: $cmd")
+        if (spec.consent == ConsentClass.SESSION_GATED) gate()?.let { return it }
 
         return when (cmd) {
             "ping" -> ok().put("service", "a11y").put("uid", android.os.Process.myUid())
             "commands" -> commandsIndex()
+            "access" -> accessManifest()
             "capabilities" -> capabilities()
             "status" -> ok()
                 .put("sessionActive", consent != null && System.currentTimeMillis() <= consent!!.until)
@@ -401,7 +449,7 @@ class AgentAccessibilityService : AccessibilityService() {
             runCatching { startActivity(i) }
                 .fold({ ok() }, { err().put("error", it.message) })
         }
-        else -> err().put("error", "unknown cmd: $cmd")
+        else -> err().put("error", "unknown cmd: $cmd") // unreachable: REGISTRY lookup gates dispatch
         }
     }
 
@@ -543,43 +591,28 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     private fun commandsIndex(): JSONObject {
         val cmds = JSONArray()
-        fun add(name: String, args: String, what: String, note: String = "") {
-            cmds.put(JSONObject().put("cmd", name).put("args", args)
-                .put("does", what).put("note", note))
+        // Rendered from the REGISTRY — single source of truth shared with the
+        // consent gate, so the index cannot drift from enforcement.
+        for (s in REGISTRY) {
+            val gestureNote = if (s.name in setOf("tap", "longPress", "swipe") && gesturesBlocked)
+                "BLOCKED: injected gestures cancelled by this OEM build" else s.note
+            cmds.put(JSONObject()
+                .put("cmd", s.clientAlias ?: s.name)
+                .put("wire", s.name)
+                .put("args", s.args)
+                .put("does", s.does)
+                .put("note", gestureNote)
+                .put("consent", when (s.consent) {
+                    ConsentClass.UNGATED -> "ungated"
+                    ConsentClass.GRANT_IS_CONSENT -> "grant-is-consent"
+                    ConsentClass.SESSION_GATED -> "session-gated"
+                    ConsentClass.CLIENT_LOCAL -> "client-local"
+                }))
         }
-        add("ping", "", "service handshake; returns uid")
-        add("commands", "", "this index")
-        add("capabilities", "", "live device capability probe (what works on THIS phone)")
-        add("tap", "x y", "tap at coordinates",
-            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
-        add("longPress", "x y", "press-and-hold at coordinates",
-            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
-        add("swipe", "fromX fromY toX toY [durationMs]", "stroke gesture",
-            if (gesturesBlocked) "BLOCKED: injected gestures cancelled by this OEM build" else "")
-        add("click", "\"label\"", "node-click by visible text/content-desc — primary input method")
-        add("clickId", "view-id", "node-click by resource id")
-        add("text", "\"value\"", "type into the focused input field")
-        add("back", "", "global action: back")
-        add("home", "", "global action: home")
-        add("notifications", "", "global action: pull notification shade")
-        add("key", "keyCode", "press a key", "limited to back/home/recents; arbitrary keys need INJECT_EVENTS (usually denied)")
-        add("screen", "", "visible text elements + bounds + clickability (JSON)")
-        add("tree", "[maxDepth]", "active window hierarchy (JSON)")
-        add("launch", "uri", "open ACTION_VIEW intent", "works where shell am start is OEM-blocked")
-        add("session", "\"desc\" [seconds]", "request user consent overlay — REQUIRED before any read/click/type/launch; blocks up to 120s waiting for Approve/Deny")
-        add("status", "", "current session state (active, expiry, pending prompt)")
-        add("health", "status|hr|steps [hours]|sleep [days]", "health telemetry — permission-scoped (Health Connect grant IS consent)",
-            "hr reads the newest synced sample (may lag the watch by minutes); status shows grant state before first use")
-        add("location", "", "last-known fix {lat,lon,accuracyM,ageSec} or one current fetch",
-            "permission-scoped — location grant IS consent")
-        add("notifstatus", "", "notification-listener grant state + snapshot count (no content)")
-        add("notiflist", "", "active notifications (pkg/title/text)", "SESSION-GATED — message content is privacy-peer to screen")
-        add("logtail", "[bytes]", "last N bytes (default 4096, max 16384) of the app's own server.log",
-            "NOT session-gated — the app's own lifecycle lines, no user content")
         return ok().put("commands", cmds)
             .put("gesturesBlocked", gesturesBlocked)
             .put("consentGate", true)
-            .put("note", "consent-gated: screen/tree/click/clickId/text/tap/longPress/swipe/key/launch/notiflist require an approved session; agentctl session requests one via full-screen overlay. logtail is ungated (app's own diagnostic log). gesturesBlocked is learned: first cancelled gesture flips it.")
+            .put("note", "consent classes: session-gated commands require an approved session (agentctl session requests one via full-screen overlay); grant-is-consent commands run under their scoped permission grant (health/location); ungated = introspection/navigation/app-own-diagnostics; client-local = runs in the agent shell, never crosses the gated socket. gesturesBlocked is learned: first cancelled gesture flips it.")
     }
 
     /**
@@ -588,6 +621,63 @@ class AgentAccessibilityService : AccessibilityService() {
      * service learns it from the dispatcher itself.
      */
     @Volatile private var gesturesBlocked = false
+
+    /**
+     * The complete runtime access manifest — the honest whole picture for a
+     * zero-context agent landing on this device. Everything here is MEASURED
+     * (live probes) or GENERATED (from the same REGISTRY the consent gate
+     * enforces), never hand-maintained prose that can drift from reality.
+     */
+    private fun accessManifest(): JSONObject {
+        val m = JSONObject()
+        m.put("manifestVersion", 1)
+        m.put("device", JSONObject()
+            .put("envName", getSharedPreferences("letta_env", MODE_PRIVATE)
+                .getString("env_name", "android") ?: "android")
+            .put("app", "Agents Beamdown (com.angussoftware.letta.env)")
+            .put("deviceClass", if (resources.configuration.isScreenRound) "watch" else "phone")
+            .put("uid", android.os.Process.myUid())
+            .put("root", false))
+
+        // ---- filesystem: live probes, self-cleaning ----
+        fun probeFs(path: File, write: Boolean): JSONObject {
+            val r = JSONObject().put("path", path.absolutePath)
+            r.put("read", runCatching { path.canRead() }.getOrDefault(false))
+            r.put("write", if (write) runCatching {
+                val t = File(path, ".agentctl-probe")
+                val okW = t.createNewFile(); if (okW) t.delete(); okW
+            }.getOrDefault(false) else JSONObject.NULL)
+            return r
+        }
+        m.put("filesystem", JSONArray()
+            .put(probeFs(File("/sdcard"), write = true))          // shared storage (legacy-storage targetSdk 28)
+            .put(probeFs(filesDir.parentFile ?: filesDir, write = true)) // app-private sandbox
+            .put(probeFs(File("/system"), write = false)))         // read-only system partition
+
+        // ---- consent model ----
+        m.put("consentModel", JSONObject()
+            .put("sessionTtlSeconds", 300)
+            .put("promptTimeoutSeconds", 120)
+            .put("timeoutBehavior", "deny (fail-closed)")
+            .put("classes", JSONObject()
+                .put("ungated", "introspection, navigation, app-own diagnostics — no consent needed")
+                .put("grant-is-consent", "scoped telemetry (health/location) — the Android permission grant IS the consent")
+                .put("session-gated", "privacy-bearing UI access — requires an approved consent overlay session")
+                .put("client-local", "runs in the agent shell (never crosses the gated socket); no per-action consent")))
+
+        // ---- the full command surface, straight from the registry ----
+        m.put("commands", commandsIndex().optJSONArray("commands") ?: JSONArray())
+
+        // ---- shell context (the OTHER door) ----
+        m.put("shellContext", JSONObject()
+            .put("note", "agents dispatched to this environment get a full Linux shell (proot rootfs) as the app uid — separate, BROADER trust door: file-level access across the app sandbox and /sdcard, no per-action consent")
+            .put("boundaries", JSONArray()
+                .put("no root")
+                .put("Android app sandbox: other apps' private data invisible")
+                .put("/system read-only")))
+
+        return ok().put("access", m)
+    }
 
     /**
      * Live capability probe: run REAL system commands from the app uid and

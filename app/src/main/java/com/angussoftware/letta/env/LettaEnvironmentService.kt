@@ -492,6 +492,41 @@ class LettaEnvironmentService : Service() {
     }
 
     /**
+     * Drop an honest README into the agent's shell home at every server
+     * start. Zero-context agents that land here via dispatch see the trust
+     * picture before their first action — even if they never discover
+     * agentctl. Refreshed each launch so it can never go stale.
+     */
+    private fun writeAgentReadme(rootfsDir: File) {
+        runCatching {
+            val home = File(rootfsDir, "root")
+            home.mkdirs()
+            File(home, "README.txt").writeText("""
+                You are running on someone's Android device (app: Agents Beamdown).
+
+                Before doing anything, run:  agentctl access
+                That prints the complete, live-verified access manifest: what
+                this environment can touch, every agentctl command with its
+                consent class, and the session rules.
+
+                The short version:
+                - Your shell runs as an unprivileged app uid (no root). You can
+                  read/write this app's storage and /sdcard (shared storage).
+                  Other apps' private data is invisible; /system is read-only.
+                - Screen reading, tapping, typing, launching, and notification
+                  content are CONSENT-GATED: they require the device owner to
+                  approve a full-screen overlay (agentctl session "description").
+                  Timeout or decline = denied, fail-closed.
+                - Health/location telemetry run under their Android permission
+                  grants — the grant IS the consent.
+
+                The device owner sees a consent prompt. Don't work around it.
+                (generated at server start; agentctl access is always live truth)
+            """.trimIndent())
+        }.onFailure { log("agent README write failed: ${it.message}") }
+    }
+
+    /**
      * Upgrade @letta-ai/letta-code inside the rootfs via npm, re-apply the
      * Android-specific letta.js patches (SELinux forbids the hardlink-based
      * locks), then hand back to runEnvironment() to relaunch the server.
@@ -797,6 +832,7 @@ class LettaEnvironmentService : Service() {
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
 
         runDiagnostics(libDir, rootfsDir)
+        writeAgentReadme(rootfsDir)
 
         setStatus("starting letta server")
         log("Launching letta server (env: ${envName()}, libdir: $libPath)...")
