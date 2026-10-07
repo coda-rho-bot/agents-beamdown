@@ -73,7 +73,7 @@ minSdk 26 is fine (HC SDK floor is 26; HC itself needs device API 28+ — phone 
   policy, so "recent HR" may lag minutes; include `ageSec` and never claim it's live.
 
 ### 1.4 Command channel wiring
-Handlers live in `AgentAccessibilityService.handle()` (the 127.0.0.1:8765 channel `agentctl`
+Handlers live in `AgentAccessibilityService.handle()` (the unix-socket `agentctl` channel, files/agentctl.sock
 speaks), delegating to `HealthReader`. **Run telemetry on the socket thread** — add `"health"`,
 `"notifications"`, `"location"` to the session-style bypass in `execute()` (they touch no a11y
 APIs; the 15s main-handler latch is unnecessary and suspend calls shouldn't hold the main thread).
