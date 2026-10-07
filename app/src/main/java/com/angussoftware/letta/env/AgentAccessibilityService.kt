@@ -18,6 +18,7 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.system.Os
 import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
 
 /**
  * AgentAccessibilityService — turns the phone into an agent-operable device.
@@ -95,8 +96,8 @@ class AgentAccessibilityService : AccessibilityService() {
         )
     }
 
-    private val pool = Executors.newCachedThreadPool()
-    private var localServer: LocalServerSocket? = null
+    @Volatile private var pool: ExecutorService = Executors.newCachedThreadPool()
+    @Volatile private var localServer: LocalServerSocket? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -108,7 +109,9 @@ class AgentAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         runCatching { localServer?.close() }
+        localServer = null // allow restart in the same process (a11y toggle)
         pool.shutdownNow()
+        pool = Executors.newCachedThreadPool() // fresh pool for a restart
         super.onDestroy()
     }
 
@@ -134,7 +137,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 sockFile.delete() // stale socket from a previous process
                 val ss = LocalServerSocket(sockFile.absolutePath)
                 localServer = ss
-                runCatching { Os.chmod(sockFile.absolutePath, 420 /*0600 octal*/) } // owner-only, defense in depth
+                runCatching { Os.chmod(sockFile.absolutePath, 384 /* 0600 octal — owner rw only */) } // owner-only, defense in depth
                 log("agentctl socket up (unix): ${sockFile.absolutePath}")
                 while (true) {
                     val client = ss.accept()
