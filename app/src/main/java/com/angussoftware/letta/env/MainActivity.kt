@@ -160,6 +160,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var updateCard: LinearLayout? = null
     private var updateText: TextView? = null
     private var updateBtn: TextView? = null
+    // Manual-fallback link under the Download/Install button (Oct 7):
+    // "In-app download failing? Get it from the download page" — small
+    // accent TextView, assigned by both form factors, owned by the update
+    // card group. Phone: clickable (opens browser). Watch: no browser —
+    // displays the URL for the user to fetch from a computer.
+    private var updateFallbackLink: TextView? = null
+    // Second line of the fallback (the bare URL) — phone only; toggled in
+    // lockstep with updateFallbackLink by renderUpdateCard.
+    private var updateFallbackUrlLine: TextView? = null
 
     /**
      * Update-card button (phone + watch share this): user-initiated taps are
@@ -549,6 +558,18 @@ class MainActivity : androidx.activity.ComponentActivity() {
         watchUpdateRow.addView(updateText)
         watchUpdateRow.addView(updateBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        // Manual fallback (Oct 7): no browser on Wear OS — show the URL so
+        // the user can fetch the APK from a computer if the in-app flow
+        // fails. Small dim text under the pill, visibility owned by
+        // renderUpdateCard (toggles with the card).
+        updateFallbackLink = watchText(
+            "Download failing? Fetch from a computer:\n${FeedbackLinks.DOWNLOAD_URL.removePrefix("https://")}",
+            9f, W.textDim).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(4), 0, 0)
+            visibility = View.GONE
+        }
+        watchUpdateRow.addView(updateFallbackLink)
         updateCard = watchUpdateRow
         content.addView(watchUpdateRow)
         // NOTE: no battery pill on watch — One UI Watch ships NO per-app
@@ -602,8 +623,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val privacyPill = watchPill("Privacy policy") {
             openExternalUrl(FeedbackLinks.PRIVACY_URL)
         }
+        // Always-available download page (Oct 7): no browser on Wear OS —
+        // ACTION_VIEW falls through to the details page; instead show the
+        // URL in a dialog-free toast + keep it on screen via long-press?
+        // Simplest honest behavior: copy to clipboard + toast confirmation.
+        val downloadPill = watchPill("Download page") {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                "Agents Beamdown download page", FeedbackLinks.DOWNLOAD_URL))
+            Toast.makeText(this, "URL copied — open on a computer:\ndl.angussoftware.dev/agents-beamdown",
+                Toast.LENGTH_LONG).show()
+        }
         listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill,
-               reportPill, sourcePill, kofiPill, privacyPill).forEach { b ->
+               reportPill, sourcePill, kofiPill, privacyPill, downloadPill).forEach { b ->
             content.addView(b, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             content.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
@@ -1239,6 +1271,32 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateCard!!.addView(updateText)
         updateCard!!.addView(updateBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        // Manual fallback link (Oct 7): directly under the Download button —
+        // if the in-app download fails, the user can fetch the APK from the
+        // download page in any browser. Visibility owned by renderUpdateCard
+        // (same states as the card itself).
+        updateFallbackLink = TextView(this).apply {
+            text = "Download not working? Get it from the website:"
+            textSize = 12f
+            setTextColor(C.accent)
+            setPadding(0, dp(6), 0, 0)
+            setOnClickListener { openExternalUrl(FeedbackLinks.DOWNLOAD_URL) }
+            isClickable = true
+            visibility = View.GONE
+        }
+        val updateFallbackUrl = TextView(this).apply {
+            text = FeedbackLinks.DOWNLOAD_URL.removePrefix("https://")
+            textSize = 12f
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.DOWNLOAD_URL) }
+            isClickable = true
+            visibility = View.GONE
+        }
+        updateCard!!.addView(updateFallbackLink)
+        updateCard!!.addView(updateFallbackUrl)
+        // renderUpdateCard drives BOTH link lines via updateFallbackLink;
+        // mirror the URL line onto the field so the tick can toggle it too.
+        updateFallbackUrlLine = updateFallbackUrl
         applyCardSpacing(updateCard!!)
         root.addView(updateCard)
         // Card builds GONE; spacer must too, or it orphans until the first
@@ -1391,6 +1449,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             setTextColor(C.accent)
             setOnClickListener { openExternalUrl(FeedbackLinks.PRIVACY_URL) }
         }
+        val downloadBtn = Button(this).apply {
+            text = "Download page"
+            textSize = 13f
+            backgroundTintList = android.content.res.ColorStateList.valueOf(
+                C.accent.withAlpha(if (isDark()) 0x2A else 0x14))
+            setTextColor(C.accent)
+            setOnClickListener { openExternalUrl(FeedbackLinks.DOWNLOAD_URL) }
+        }
         feedbackCard.addView(reportBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         feedbackCard.addView(sourceBtn, LinearLayout.LayoutParams(
@@ -1398,6 +1464,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         feedbackCard.addView(kofiBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         feedbackCard.addView(privacyBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        feedbackCard.addView(downloadBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         applyCardSpacing(feedbackCard)
         root.addView(feedbackCard)
@@ -2036,7 +2104,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 tv.setTextColor(primary)
                 btn.text = "Download"
                 btn.isEnabled = true
+                // Manual fallback (Harry, Oct 7): the download-page link sits
+                // directly under the Download button — if the in-app flow
+                // fails, the user can fetch the APK themselves. Visible in
+                // every card state so it also covers download/install
+                // failures, not just "not started".
+                updateFallbackLink?.visibility = View.VISIBLE
             }
+        }
+        // Any non-DOWNLOAD-visible state that HIDES the card also hides the
+        // fallback link (it lives inside the card's vertical group).
+        if (card.visibility != View.VISIBLE) {
+            updateFallbackLink?.visibility = View.GONE
+            updateFallbackUrlLine?.visibility = View.GONE
+        } else {
+            updateFallbackUrlLine?.visibility = View.VISIBLE
         }
         // Keep the spacer in lockstep with the card — otherwise a GONE card
         // leaves an orphaned 10dp spacer (double gap at that position).

@@ -22,6 +22,14 @@ object FeedbackLinks {
     const val KOFI_URL = "https://ko-fi.com/angussoftware"
 
     /**
+     * Public download page (dl.angussoftware.dev — same static file server the
+     * in-app updater fetches latest.json from). Shown next to the update-card
+     * Download button as the manual fallback when the in-app download flow
+     * fails, and in the feedback/About areas as an always-available link.
+     */
+    const val DOWNLOAD_URL = "https://dl.angussoftware.dev/agents-beamdown"
+
+    /**
      * Privacy policy (legal.angussoftware.com — same page the download site
      * dl.angussoftware.dev/agents-beamdown links to; URL pulled from its
      * index.html, not invented).
