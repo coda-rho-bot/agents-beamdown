@@ -41,6 +41,17 @@ class FeedbackLinksTest {
     }
 
     @Test
+    fun downloadUrlIsTheUpdaterFeedHost() {
+        // Contract (Oct 7): the manual-fallback link must point at the same
+        // host+path the in-app updater fetches latest.json from — if the
+        // download server moves, BOTH must move together.
+        assertEquals(
+            "https://dl.angussoftware.dev/agents-beamdown",
+            FeedbackLinks.DOWNLOAD_URL
+        )
+    }
+
+    @Test
     fun privacyUrlIsThePublishedPolicy() {
         // Contract: the exact URL the download page (dl.angussoftware.dev/
         // agents-beamdown) links to — a typo here sends users to a 404.

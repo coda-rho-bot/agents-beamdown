@@ -564,7 +564,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         // renderUpdateCard (toggles with the card).
         updateFallbackLink = watchText(
             "Download failing? Fetch from a computer:\n${FeedbackLinks.DOWNLOAD_URL.removePrefix("https://")}",
-            9f, W.textDim).apply {
+            10.5f, W.textDim).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(4), 0, 0)
             visibility = View.GONE
@@ -623,15 +623,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val privacyPill = watchPill("Privacy policy") {
             openExternalUrl(FeedbackLinks.PRIVACY_URL)
         }
-        // Always-available download page (Oct 7): no browser on Wear OS —
-        // ACTION_VIEW falls through to the details page; instead show the
-        // URL in a dialog-free toast + keep it on screen via long-press?
-        // Simplest honest behavior: copy to clipboard + toast confirmation.
+        // Always-available download page (Oct 7): Wear OS has no browser,
+        // so ACTION_VIEW would dead-end. Honest behavior: copy the URL to
+        // clipboard + toast it — the user fetches from a computer either way
+        // (sideload path needs one).
         val downloadPill = watchPill("Download page") {
             val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
             cm.setPrimaryClip(android.content.ClipData.newPlainText(
                 "Agents Beamdown download page", FeedbackLinks.DOWNLOAD_URL))
-            Toast.makeText(this, "URL copied — open on a computer:\ndl.angussoftware.dev/agents-beamdown",
+            Toast.makeText(this, "URL copied — open on a computer:\n${FeedbackLinks.DOWNLOAD_URL.removePrefix("https://")}",
                 Toast.LENGTH_LONG).show()
         }
         listOf(startPill, stopPill, upgradePill, rekeyPill, a11yPill,
@@ -2104,20 +2104,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 tv.setTextColor(primary)
                 btn.text = "Download"
                 btn.isEnabled = true
-                // Manual fallback (Harry, Oct 7): the download-page link sits
-                // directly under the Download button — if the in-app flow
-                // fails, the user can fetch the APK themselves. Visible in
-                // every card state so it also covers download/install
-                // failures, not just "not started".
-                updateFallbackLink?.visibility = View.VISIBLE
+                // Manual fallback (Harry, Oct 7): see the post-when block —
+                // both fallback lines toggle with card visibility there.
             }
         }
         // Any non-DOWNLOAD-visible state that HIDES the card also hides the
         // fallback link (it lives inside the card's vertical group).
+        // Card-visible (INSTALL/DOWNLOAD/DOWNLOADING incl. paused) → BOTH
+        // fallback lines visible — the link must survive process restarts
+        // mid-flow (persisted dlId/dlDone restore straight into
+        // DOWNLOADING/INSTALL without passing through DOWNLOAD).
         if (card.visibility != View.VISIBLE) {
             updateFallbackLink?.visibility = View.GONE
             updateFallbackUrlLine?.visibility = View.GONE
         } else {
+            updateFallbackLink?.visibility = View.VISIBLE
             updateFallbackUrlLine?.visibility = View.VISIBLE
         }
         // Keep the spacer in lockstep with the card — otherwise a GONE card

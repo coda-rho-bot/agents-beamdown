@@ -132,26 +132,44 @@ class AgentAccessibilityService : AccessibilityService() {
         // java.net.Socket) — the gate was structurally fail-open.
         if (localServer != null) return
         pool.execute {
-            try {
-                val sockFile = java.io.File(filesDir, "agentctl.sock")
-                sockFile.delete() // stale socket from a previous process
-                val ss = LocalServerSocket(sockFile.absolutePath)
-                localServer = ss
-                runCatching { Os.chmod(sockFile.absolutePath, 384 /* 0600 octal — owner rw only */) } // owner-only, defense in depth
-                log("agentctl socket up (unix): ${sockFile.absolutePath}")
-                while (true) {
-                    val client = ss.accept()
-                    // Defense-in-depth: verify peer uid even though the 600
-                    // socket file already blocks other apps.
-                    val peerOk = runCatching {
-                        client.peerCredentials?.uid == android.os.Process.myUid()
-                    }.getOrDefault(false)
-                    if (!peerOk) {
-                        runCatching { client.close() }; continue
+            // Self-heal loop (Oct 7 live finding): a single swallowed bind
+            // failure (stale socket held by a dying process, transient ENOENT
+            // on filesDir) left the channel dead until a manual a11y toggle.
+            // Retry forever with backoff; every failure is logged so the gap
+            // is visible in a11y.log instead of silent.
+            var backoffMs = 1000L
+            while (localServer == null && instance != null) {
+                try {
+                    val sockFile = java.io.File(filesDir, "agentctl.sock")
+                    sockFile.delete() // stale socket from a previous process
+                    val ss = LocalServerSocket(sockFile.absolutePath)
+                    localServer = ss
+                    runCatching { Os.chmod(sockFile.absolutePath, 384 /* 0600 octal — owner rw only */) } // owner-only, defense in depth
+                    backoffMs = 1000L
+                    log("agentctl socket up (unix): ${sockFile.absolutePath}")
+                    while (true) {
+                        val client = ss.accept()
+                        // Defense-in-depth: verify peer uid even though the 600
+                        // socket file already blocks other apps.
+                        val peerOk = runCatching {
+                            client.peerCredentials?.uid == android.os.Process.myUid()
+                        }.getOrDefault(false)
+                        if (!peerOk) {
+                            runCatching { client.close() }; continue
+                        }
+                        pool.execute { serveLocal(client) }
                     }
-                    pool.execute { serveLocal(client) }
+                } catch (e: Exception) {
+                    // socket closed (service going down — instance==null exits
+                    // the loop) or bind failure (retry with backoff)
+                    if (instance == null) break
+                    log("agentctl socket bind failed (${e.javaClass.simpleName}: ${e.message}) — retry in ${backoffMs}ms")
+                    runCatching { localServer?.close() }
+                    localServer = null
+                    runCatching { Thread.sleep(backoffMs) }
+                    backoffMs = (backoffMs * 2).coerceAtMost(30000L)
                 }
-            } catch (_: Exception) { /* socket closed or bind failure */ }
+            }
         }
     }
 
