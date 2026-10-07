@@ -81,7 +81,7 @@ steps:
             sys.exit(1)
         size = os.path.getsize('app/src/main/assets/rootfs.tar')
         print(f'rootfs.tar downloaded: {size} bytes')
-        EXPECTED_SHA = 'd124f166184beac5de699f80d3fa1e0e1af9e3b51795bf169c79cc3367081b85'
+        EXPECTED_SHA = '78d4135a33a84c716c5e222435b5f612c44ad73ce15101ea19c291a49e23072c'
         import hashlib
         h = hashlib.sha256()
         with open('app/src/main/assets/rootfs.tar', 'rb') as f:

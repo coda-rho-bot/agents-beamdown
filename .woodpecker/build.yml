@@ -1,7 +1,7 @@
 # Continuous build: unit tests + assembleDebug on push/PR to main.
 # The release pipeline (.woodpecker/release.yml) handles tag builds —
 # including the rootfs download and post-build APK injection, which
-# need the 162MB gitignored rootfs.tar and are release-only concerns.
+# need the ~194MB gitignored rootfs.tar and are release-only concerns.
 #
 # Repos are private on Forgejo — server-side netrc injection does not work
 # with this setup, so clone auth is explicit: CI_NETRC_* env sourced from
@@ -35,7 +35,7 @@ steps:
         fi
         yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
         echo "sdk.dir=$ANDROID_HOME" > local.properties
-      # rootfs.tar is gitignored (162MB) — asset merge needs it present.
+      # rootfs.tar is gitignored (~194MB) — asset merge needs it present.
       # Fetch the current build rootfs from the internal rootfs-source
       # release attachment. Leak-proof (PR #80 pattern, post-#287):
       # FORGEJO_TOKEN consumed ONLY via os.environ inside Python; zero
@@ -65,6 +65,17 @@ steps:
             sys.exit(1)
         size = os.path.getsize('app/src/main/assets/rootfs.tar')
         print(f'rootfs.tar downloaded: {size} bytes')
+
+        # Baked-version assert: prove the rootfs carries the pinned letta-code
+        # (green CI otherwise proves nothing about the pin — PR #115 review 2720).
+        import tarfile as _tf, json as _json
+        with _tf.open('app/src/main/assets/rootfs.tar', 'r:gz') as _t:
+            _f = _t.extractfile('./usr/local/lib/node_modules/@letta-ai/letta-code/package.json')
+            _pkg = _json.loads(_f.read())
+        _pin = open('tools/rootfs-build/PIN').read().strip()
+        if _pkg['version'] != _pin:
+            raise SystemExit(f'FATAL: baked letta-code {_pkg["version"]} != pin {_pin} (refresh rootfs asset or the PIN file)')
+        print(f'baked letta-code {_pkg["version"]} == pin {_pin}')
         PYEOF
         python3 /tmp/fetch-rootfs.py
         ls -la app/src/main/assets/rootfs.tar

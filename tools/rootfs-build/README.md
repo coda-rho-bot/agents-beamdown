@@ -13,7 +13,7 @@ Reproduces the Debian arm64 rootfs with all byte patches for the Android app.
 ## Steps
 
 1. `pull-rootfs.sh` — fetch Debian bookworm arm64 base
-2. `rebuild.sh` — install node 22.23.2 + letta-code (pinned 0.30.27), swap
+2. `rebuild.sh` — install node 22.23.2 + letta-code (pinned — see PIN), swap
    native deps to arm64 (sharp, ripgrep), zig-build node-pty
 3. `patch-binaries.py rootfs/` — apply the four byte patches:
    - rseq -> -ENOSYS (seccomp trap)

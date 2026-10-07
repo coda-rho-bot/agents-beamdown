@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 B=/tmp/zfold-build
 LC=$B/rootfs/usr/local/lib/node_modules/@letta-ai/letta-code
 cd $B
@@ -20,4 +21,7 @@ export PATH="/tmp/zfold-build/zig-x86_64-linux-0.16.0:$PATH"
 export CC="zig cc -target aarch64-linux-gnu.2.36" CXX="zig c++ -target aarch64-linux-gnu.2.36"
 npx node-gyp rebuild --arch=arm64 --nodedir=/tmp/zfold-build/rootfs/usr/local 2>&1 | tail -1
 echo "== 4. smoke test under qemu =="
-timeout 110 $B/qemu-aarch64-static -L $B/rootfs $B/rootfs/usr/local/bin/node $LC/letta.js --version
+PIN=$(cat "$(dirname "$0")/PIN" 2>/dev/null || cat "$(dirname "$0")/../rootfs-build/PIN")
+GOT=$(timeout 110 $B/qemu-aarch64-static -L $B/rootfs $B/rootfs/usr/local/bin/node $LC/letta.js --version) || { echo "FATAL: qemu smoke failed"; exit 1; }
+[ "$GOT" = "$PIN (Letta Code)" ] || { echo "FATAL: smoke got '$GOT', expected '$PIN (Letta Code)'"; exit 1; }
+echo "smoke OK: $GOT"
