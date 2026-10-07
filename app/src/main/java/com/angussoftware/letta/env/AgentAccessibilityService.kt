@@ -644,7 +644,10 @@ class AgentAccessibilityService : AccessibilityService() {
             val r = JSONObject().put("path", path.absolutePath)
             r.put("read", runCatching { path.canRead() }.getOrDefault(false))
             r.put("write", if (write) runCatching {
+                // delete-before-probe: a stale marker from a crash or
+                // concurrent call must not read as write:false forever
                 val t = File(path, ".agentctl-probe")
+                t.delete()
                 val okW = t.createNewFile(); if (okW) t.delete(); okW
             }.getOrDefault(false) else JSONObject.NULL)
             return r

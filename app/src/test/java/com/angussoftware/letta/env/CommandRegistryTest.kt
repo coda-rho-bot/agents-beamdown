@@ -29,7 +29,10 @@ class CommandRegistryTest {
         // this fails the build — docs/enforcement drift becomes a test
         // failure instead of a runtime lie.
         val script = File("src/main/assets/agentctl.sh").readText()
-        val sent = Regex(""""cmd":"([a-zA-Z-]+)"""").findAll(script).map { it.groupValues[1] }.toSet()
+        // Match both literal sends ('{"cmd":"x"') and escaped-quote sends
+        // ("{\"cmd\":\"x\"") — the client uses both forms.
+        val sent = Regex("""\\?"?cmd\\?"?\s*:\s*\\?"([a-zA-Z-]+)\\?"""")
+            .findAll(script).map { it.groupValues[1] }.toSet()
         assertTrue("agentctl.sh not found or unreadable", sent.isNotEmpty())
         val known = registry.flatMap { listOfNotNull(it.name, it.clientAlias) }.toSet()
         val unknown = sent - known
