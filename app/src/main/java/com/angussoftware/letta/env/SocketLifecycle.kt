@@ -75,8 +75,8 @@ class SocketLifecycle(
             }
             previous?.let { prev ->
                 runCatching { prev.close() }
-                // close() unlinks the name for LocalServerSocket — but be
-                // explicit in case close is overridden/no-op in a handle impl.
+                // close() does NOT unlink the filesystem name on AOSP — the
+                // explicit unlink below IS the cleanup (same rule as shutdown()).
                 runCatching { binder.unlink(path) }
                 log("agentctl socket: previous owner closed before rebind")
             }
@@ -132,7 +132,9 @@ class AndroidSocketBinder : SocketLifecycle.Binder {
      * Held for the lifetime of the server created from its fd:
      * LocalServerSocket(FileDescriptor) SHARES the FileDescriptor, so if
      * this holder is garbage-collected its finalizer closes the fd and
-     * kills the live server. Cleared only after the server fd is closed.
+     * kills the live server. Clearing the pin IS the close path: the
+     * server's close() no-ops on its adopted fd, so the fd is actually
+     * closed by this holder's finalizer once the pin is released.
      *
      * CONSTRAINT: one bound path per AndroidSocketBinder instance. A second
      * bind on the same instance overwrites this field — never share one
@@ -142,7 +144,7 @@ class AndroidSocketBinder : SocketLifecycle.Binder {
 
     override fun bind(path: String): Any {
         // LocalServerSocket(String) binds an abstract-family namespace
-        // (default RESERVED) — no socket file is ever created (leading '@'
+        // (default Namespace.ABSTRACT) — no socket file is ever created (leading '@'
         // in /proc/net/unix), so the filesystem client (nc -U <path>)
         // always got ENOENT and the 0600 DAC design never materialized.
         // agentctl was dead on every install since v0.4.25 while "bind"

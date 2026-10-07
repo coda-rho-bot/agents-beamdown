@@ -9,7 +9,7 @@ import org.junit.Test
  *
  * History (v0.4.25–v0.4.29): AndroidSocketBinder used
  * `LocalServerSocket(path)`, whose single-name constructor binds an
- * abstract-family namespace (default RESERVED) — no socket file was ever
+ * abstract-family namespace (default Namespace.ABSTRACT) — no socket file was ever
  * created (leading '@' in /proc/net/unix on both phone and watch), so the
  * filesystem client (nc -U <path>) always got ENOENT. agentctl was dead on
  * every install while bind logs looked healthy.
@@ -36,9 +36,10 @@ class SocketNamespaceContractTest {
     private fun bindBody(text: String): String =
         text.substringAfter("override fun bind(").substringBefore("override fun bindHandle")
 
-    /** Strip // line comments so explanatory prose can't satisfy or trip assertions. */
+    /** Strip block (non-nesting) then line comments so explanatory prose can't satisfy or trip assertions. */
     private fun codeOnly(text: String): String =
-        text.replace(Regex("""//[^\n]*"""), "")
+        text.replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("""//[^\n]*"""), "")
 
     /** Balanced-paren argument text for every call site of [callee] in [code]. */
     private fun callArgs(code: String, callee: String): List<String> {
@@ -95,7 +96,7 @@ class SocketNamespaceContractTest {
         val addrCalls = callArgs(body, "LocalSocketAddress")
         assertTrue(
             "Every LocalSocketAddress in bind() must carry an EXPLICIT namespace — the " +
-                "single-name constructor defaults to RESERVED (abstract family), which " +
+                "single-name constructor defaults to Namespace.ABSTRACT (abstract family), which " +
                 "recreates the exact no-file symptom. Got args: $addrCalls",
             addrCalls.isNotEmpty() && addrCalls.all { it.contains("Namespace.") },
         )
