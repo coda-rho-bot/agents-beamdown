@@ -1297,6 +1297,39 @@ class LettaEnvironmentService : Service() {
         }
         log("git ELF chain installed (git-elf, gc-shim, dnsport.so, dns-forwarder.js)")
 
+
+        // agentctl: agent-side client for the accessibility command channel
+        // (tap/swipe/text/screen-tree) + am/pm/notify passthroughs. Always
+        // rewrite — same policy as dx. Source: app/src/main/assets/agentctl.sh.
+        val agentctl = File(binDir, "agentctl")
+        assets.open("agentctl.sh").use { input ->
+            agentctl.outputStream().use { output -> input.copyTo(output) }
+        }
+        agentctl.setExecutable(true, false)
+        log("agentctl installed")
+
+        // git payload tarballs staged to the filesDir ROOT under their exact
+        // asset names — the wrapper looks for $FILES/git-arm64.tar.gz and
+        // $FILES/proot-aarch64.tar.gz (offline first-run install; falls back
+        // to the GitHub plugins-v1 release URLs when absent). proot is staged
+        // too so the wrapper shares dx's plugin install without a download.
+        // Large (31.5MB git payload): copy once per install, like rootfs.tar.
+        // Partial-copy self-heal: rootfs uses a marker+verify pattern for the
+        // same class of problem; here a size check is enough (assets are
+        // immutable, so length mismatch = interrupted copy). Rewrite from the
+        // asset on mismatch — no manual cleanup path needed.
+        for (payloadName in listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz")) {
+            val payload = File(filesDir, payloadName)
+            val assetSize = assets.open(payloadName).use { it.available().toLong() }
+            if (!payload.exists() || payload.length() != assetSize) {
+                if (payload.exists()) payload.delete()
+                assets.open(payloadName).use { input ->
+                    payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
+                }
+                log("$payloadName staged to filesDir (${assetSize} bytes)")
+            }
+        }
+
         // git payload resilience (Oct 7): git-elf execs rootfs/usr/bin/git as
         // a GLIBC PROGRAM (loader invocation) — it must be the real Debian
         // ELF, never a shell script, and never absent. Three observed failure
@@ -1334,38 +1367,6 @@ class LettaEnvironmentService : Service() {
                 }
             }
         }.onFailure { log("git payload resilience check failed: ${it.message}") }
-
-        // agentctl: agent-side client for the accessibility command channel
-        // (tap/swipe/text/screen-tree) + am/pm/notify passthroughs. Always
-        // rewrite — same policy as dx. Source: app/src/main/assets/agentctl.sh.
-        val agentctl = File(binDir, "agentctl")
-        assets.open("agentctl.sh").use { input ->
-            agentctl.outputStream().use { output -> input.copyTo(output) }
-        }
-        agentctl.setExecutable(true, false)
-        log("agentctl installed")
-
-        // git payload tarballs staged to the filesDir ROOT under their exact
-        // asset names — the wrapper looks for $FILES/git-arm64.tar.gz and
-        // $FILES/proot-aarch64.tar.gz (offline first-run install; falls back
-        // to the GitHub plugins-v1 release URLs when absent). proot is staged
-        // too so the wrapper shares dx's plugin install without a download.
-        // Large (31.5MB git payload): copy once per install, like rootfs.tar.
-        // Partial-copy self-heal: rootfs uses a marker+verify pattern for the
-        // same class of problem; here a size check is enough (assets are
-        // immutable, so length mismatch = interrupted copy). Rewrite from the
-        // asset on mismatch — no manual cleanup path needed.
-        for (payloadName in listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz")) {
-            val payload = File(filesDir, payloadName)
-            val assetSize = assets.open(payloadName).use { it.available().toLong() }
-            if (!payload.exists() || payload.length() != assetSize) {
-                if (payload.exists()) payload.delete()
-                assets.open(payloadName).use { input ->
-                    payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
-                }
-                log("$payloadName staged to filesDir (${assetSize} bytes)")
-            }
-        }
 
         // ripgrep is statically linked (musl) — execve from app_data works as-is.
 

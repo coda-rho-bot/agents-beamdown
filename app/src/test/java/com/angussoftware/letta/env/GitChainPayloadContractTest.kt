@@ -68,4 +68,93 @@ class GitChainPayloadContractTest {
             )
         }
     }
+
+    @Test
+    fun `asset git dot sh and tools mirror are byte-identical`() {
+        val asset = src("src/main/assets/git.sh")
+        val mirror = src("../tools/on-device/git.sh")
+        assertTrue(
+            "app/src/main/assets/git.sh and tools/on-device/git.sh must be byte-identical " +
+                "(the header's own 'keep in sync' contract — drift has bitten before).",
+            asset == mirror,
+        )
+    }
+
+    @Test
+    fun `git dot sh defines die before the primary block uses it`() {
+        val t = src("src/main/assets/git.sh")
+        val dieDef = t.indexOf("die() {")
+        val firstUse = t.indexOf("die \"")
+        assertTrue(
+            "die() must be defined before its first call — shell functions are only known " +
+                "after their definition executes; calling it earlier emits 'die: not found' " +
+                "(127) and the failure branch silently falls through (review finding 1).",
+            dieDef in 0 until firstUse,
+        )
+    }
+
+    @Test
+    fun `corrupt staged tarball is removed on extract failure`() {
+        val t = src("src/main/assets/git.sh")
+        val primary = t.substringAfter("# --- primary: static ELF chain")
+            .substringBefore("# --- fallback: proot rootfs")
+        assertTrue(
+            "The primary-path corrupt-tarball branch must rm the staged copy before dying, " +
+                "else every later run dies identically and the download path is unreachable " +
+                "(review finding 2 — port of the fallback section's own pattern).",
+            primary.contains("rm -f \"\$DX_FILES/git-arm64.tar.gz\""),
+        )
+    }
+
+    @Test
+    fun `install-time resilience check runs after tarball staging`() {
+        val t = src("src/main/java/com/angussoftware/letta/env/LettaEnvironmentService.kt")
+        val stagingLoop = t.indexOf("for (payloadName in listOf(\"git-arm64.tar.gz\"")
+        val resilience = t.indexOf("git payload resilience (Oct 7)")
+        assertTrue(
+            "The payload resilience check must run AFTER the tarball staging loop — on a " +
+                "fresh reinstall filesDir is wiped, so checking first no-ops the install-time " +
+                "restore (review finding 3).",
+            stagingLoop != -1 && resilience != -1 && resilience > stagingLoop,
+        )
+    }
+
+    /** Behavioral: run git.sh's primary block under /bin/sh with a fixture tree. */
+    @Test
+    fun `git dot sh primary failure branches actually stop`() {
+        val fixture = kotlin.io.path.createTempDirectory("gitsh-fixture")
+        try {
+            val files = fixture.toFile()
+            // chain present + good, payload = shell script (non-ELF), staged tarball = garbage
+            java.io.File(files, "bin/git-elf").apply { parentFile.mkdirs(); writeText("stub"); setExecutable(true) }
+            java.io.File(files, "gc-shim").apply { mkdirs() }
+            java.io.File(files, "gc-shim/git-remote-https").apply { writeText("stub"); setExecutable(true) }
+            java.io.File(files, "rootfs/usr/bin").apply { mkdirs() }
+            java.io.File(files, "rootfs/usr/bin/git").apply { writeText("#!/system/bin/sh\nexit 0\n") }
+            java.io.File(files, "git-arm64.tar.gz").apply { writeBytes(byteArrayOf(1, 2, 3)) } // invalid gzip
+            val script = src("src/main/assets/git.sh")
+            // Cut at the fallback section: we are testing the primary block only.
+            val primaryOnly = script.substringBefore("# --- fallback: proot rootfs") +
+                "echo \"UNREACHABLE-FELL-THROUGH\"\nexit 42\n"
+            val shFile = java.io.File(files, "test-subject.sh").apply { writeText(primaryOnly) }
+            val pb = ProcessBuilder("sh", shFile.absolutePath, "--version")
+            pb.environment().put("DX_FILES", files.absolutePath)
+            pb.redirectErrorStream(true)
+            val proc = pb.start()
+            val out = proc.inputStream.bufferedReader().readText()
+            val rc = proc.waitFor()
+            assertFalse(
+                "Primary failure branch must STOP (die) on a corrupt staged tarball — got " +
+                    "rc=$rc, output: ${out.take(300)}. Falling through re-creates the " +
+                    "misleading-loader-error bug the PR exists to kill.",
+                rc == 42 || "UNREACHABLE-FELL-THROUGH" in out,
+            )
+            assertFalse(
+                "Corrupt staged tarball must be REMOVED so the next run can download.",
+                java.io.File(files, "git-arm64.tar.gz").exists(),
+            )
+        } finally {
+            fixture.toFile().deleteRecursively()
+        }
+    }
 }
