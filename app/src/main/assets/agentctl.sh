@@ -54,7 +54,7 @@ case "${1:-help}" in
     back)      send '{"cmd":"back"}' ;;
     home)      send '{"cmd":"home"}' ;;
     notifications) send '{"cmd":"notifications"}' ;;
-    click)     V=$(printf '%s' "$2" | sed 's/"/\\"/g'); send '{"cmd":"click","text":"'$V'"}' ;;
+    click)     V=$(printf '%s' "$2" | sed 's/"/\\"/g'); send '{"cmd":"click","text":"'"$V"'"}' ;;
     clickId)   send "{\"cmd\":\"clickId\",\"id\":\"$2\"}" ;;
     screen)    send '{"cmd":"screenshot-text"}' ;;
     tree)      send "{\"cmd\":\"tree\",\"maxDepth\":${2:-18}}" ;;
@@ -94,6 +94,6 @@ case "${1:-help}" in
             echo '{"ok":true,"via":"broadcast"}'
         ;;
     help|*)
-        awk 'NR>1 && /^$/{exit} /^#/{sub(/^# ?/,""); print}' "$0"
+        awk 'NR>1 && /^$/{exit} NR>1 && /^#/{sub(/^# ?/,""); print}' "$0"
         ;;
 esac
