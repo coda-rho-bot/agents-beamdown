@@ -2,6 +2,7 @@ package com.angussoftware.letta.env
 
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.Process
 import android.system.Os
 import java.io.File
@@ -124,11 +125,47 @@ class SocketLifecycle(
 
 /** Production binder: Android LocalServerSocket + peer-uid probe. */
 class AndroidSocketBinder : SocketLifecycle.Binder {
+    /**
+     * The bound-but-not-listening socket that owns the filesystem name.
+     * Held for the lifetime of the server created from its fd:
+     * LocalServerSocket(FileDescriptor) SHARES the FileDescriptor, so if
+     * this holder is garbage-collected its finalizer closes the fd and
+     * kills the live server. Cleared only after the server fd is closed.
+     */
+    @Volatile private var nameHolder: LocalSocket? = null
+
     override fun bind(path: String): Any {
+        // LocalServerSocket(String) binds the ABSTRACT namespace — no socket
+        // file is ever created (leading '@' in /proc/net/unix), so the
+        // filesystem client (nc -U <path>) always got ENOENT and the 0600
+        // DAC design never materialized. agentctl was dead on every install
+        // since v0.4.25 while "bind" logs looked healthy.
+        //
+        // Fix: bind the FILESYSTEM namespace explicitly via LocalSocket,
+        // then hand the bound fd to LocalServerSocket(FileDescriptor),
+        // which listen()s on it. Accept loop + peerCredentials unchanged.
+        //
         // NOTE: no pre-delete here. Deleting before bind is what created the
         // zombie-inode race (loser's delete unlinked winner's entry). Bind
         // straight; SocketLifecycle's recovery paths own unlinking.
-        return LocalServerSocket(path)
+        val holder = LocalSocket()
+        try {
+            holder.bind(
+                LocalSocketAddress(
+                    path,
+                    LocalSocketAddress.Namespace.FILESYSTEM,
+                )
+            )
+            val server = LocalServerSocket(holder.getFileDescriptor())
+            nameHolder = holder
+            return server
+        } catch (e: Exception) {
+            // Release our fd; the dead name (if any) is left for
+            // SocketLifecycle's EADDRINUSE recovery path to diagnose.
+            // Binder contract: never unlink on failure.
+            runCatching { holder.close() }
+            throw e
+        }
     }
 
     override fun bindHandle(raw: Any): SocketLifecycle.ServerHandle {
@@ -136,6 +173,9 @@ class AndroidSocketBinder : SocketLifecycle.Binder {
         return object : SocketLifecycle.ServerHandle {
             override fun close() {
                 runCatching { ss.close() } // LocalServerSocket.close() unlinks
+                // Release the name holder only AFTER the server fd is
+                // closed, so its finalizer can never kill a live server.
+                nameHolder = null
             }
         }
     }
