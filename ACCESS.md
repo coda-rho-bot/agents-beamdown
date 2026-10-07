@@ -19,7 +19,7 @@ in the shell home restates this at every server start.
 **2. The agentctl door (consent-gated, per session).** UI-level access —
 reading the screen, tapping, typing, launching intents, reading
 notification content — goes through `agentctl`
-(`AgentAccessibilityService`, local socket 127.0.0.1:8765, same-uid only).
+(`AgentAccessibilityService`, local unix socket `files/agentctl.sock` mode 600, same-uid only — enforced by filesystem permissions plus peer-credential verification).
 Privacy-bearing commands require the device owner to approve a full-screen
 overlay. Session TTL 300s (max 3600s); prompt timeout 120s; timeout or
 decline = deny, fail-closed.

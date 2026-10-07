@@ -12,9 +12,10 @@ index with consent classes.
 
 ## Transport
 
-- TCP socket on `127.0.0.1:8765`, reachable only from the app's own uid
-  (peer credentials checked on accept). The agent shell (same uid) talks
-  to it via `files/bin/agentctl`.
+- Unix-domain socket at `files/agentctl.sock` (mode 600), reachable only
+  from the app's own uid — filesystem permissions block other apps at
+  connect() time, and peer credentials are re-verified on accept. The agent
+  shell (same uid) talks to it via `files/bin/agentctl` (`toybox nc -U`).
 - Line protocol: one JSON request per line → one JSON response per line.
 - Request shape: `{"cmd":"<name>", ...args}`. Response always carries
   `ok` (bool); failures add `error`.

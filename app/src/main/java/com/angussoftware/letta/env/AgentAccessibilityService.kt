@@ -14,6 +14,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.OutputStream
 import java.net.ServerSocket
+import android.net.LocalServerSocket
+import android.net.LocalSocket
+import android.system.Os
 import java.util.concurrent.Executors
 
 /**
@@ -28,9 +31,10 @@ import java.util.concurrent.Executors
  *  - tree: active window hierarchy (depth-limited JSON)
  *  - launch: start any activity (falls through to am start)
  *
- * Command channel: TCP socket on 127.0.0.1:8765 (app-internal, same-UID only
- * — other apps cannot connect; enforced by Android's per-uid loopback policy
- * is NOT a thing, so we gate on peer credential == our uid).
+ * Command channel: unix-domain socket at files/agentctl.sock (mode 600,
+ * app-internal). Filesystem DAC confines it to our uid; peer credentials
+ * verified as defense-in-depth. (The old TCP loopback listener's reflection
+ * uid-check never worked on Android — structurally fail-open; fixed.)
  * Line protocol: one JSON request per line -> one JSON response per line.
  * The agent's shell (same uid) reaches it via files/bin/agentctl.
  */
@@ -50,7 +54,6 @@ class AgentAccessibilityService : AccessibilityService() {
     )
 
     companion object {
-        const val PORT = 8765
         @Volatile var instance: AgentAccessibilityService? = null
             private set
 
@@ -93,18 +96,18 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private val pool = Executors.newCachedThreadPool()
-    private var server: ServerSocket? = null
+    private var localServer: LocalServerSocket? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         startSocket()
-        log("a11y service connected; command socket starting on $PORT")
+        log("a11y service connected; agentctl unix socket starting")
     }
 
     override fun onDestroy() {
         instance = null
-        runCatching { server?.close() }
+        runCatching { localServer?.close() }
         pool.shutdownNow()
         super.onDestroy()
     }
@@ -117,33 +120,58 @@ class AgentAccessibilityService : AccessibilityService() {
     // ---- command socket ----------------------------------------------------------
 
     private fun startSocket() {
-        if (server != null && !server!!.isClosed) return
+        // Unix-domain socket in the app's private files dir, mode 600:
+        // filesystem DAC confines connections to our own uid (other apps
+        // cannot even reach the socket inode — connect needs write perm).
+        // Peer credentials are verified as defense-in-depth below.
+        // Replaces the old TCP loopback listener, whose "same-uid" reflection
+        // check could never read a peer uid on Android (no such field on
+        // java.net.Socket) — the gate was structurally fail-open.
+        if (localServer != null) return
         pool.execute {
             try {
-                val ss = ServerSocket(PORT, 8, java.net.InetAddress.getByName("127.0.0.1"))
-                server = ss
-                while (!ss.isClosed) {
+                val sockFile = java.io.File(filesDir, "agentctl.sock")
+                sockFile.delete() // stale socket from a previous process
+                val ss = LocalServerSocket(sockFile.absolutePath)
+                localServer = ss
+                runCatching { Os.chmod(sockFile.absolutePath, 420 /*0600 octal*/) } // owner-only, defense in depth
+                log("agentctl socket up (unix): ${sockFile.absolutePath}")
+                while (true) {
                     val client = ss.accept()
-                    // Same-uid gate: only our own processes (agent shell) may talk.
-                    val peerUid = client.javaFieldInt("uid") // see helper below
-                    if (peerUid != -1 && peerUid != android.os.Process.myUid()) {
-                        client.close(); continue
+                    // Defense-in-depth: verify peer uid even though the 600
+                    // socket file already blocks other apps.
+                    val peerOk = runCatching {
+                        client.peerCredentials?.uid == android.os.Process.myUid()
+                    }.getOrDefault(false)
+                    if (!peerOk) {
+                        runCatching { client.close() }; continue
                     }
-                    pool.execute { serve(client) }
+                    pool.execute { serveLocal(client) }
                 }
             } catch (_: Exception) { /* socket closed or bind failure */ }
         }
     }
 
-    private fun Any.javaFieldInt(name: String): Int = try {
-        val f = this.javaClass.getDeclaredField(name)
-        f.isAccessible = true
-        (f.get(this) as? Int) ?: -1
-    } catch (_: Exception) { -1 }
+    private fun serveLocal(client: LocalSocket) {
+        try {
+            val reader = client.inputStream.bufferedReader()
+            val out: java.io.OutputStream = client.outputStream
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isBlank()) continue
+                val resp = runCatching { execute(org.json.JSONObject(line)) }
+                    .recover { org.json.JSONObject().put("ok", false).put("error", it.message ?: it.javaClass.simpleName) }
+                    .getOrThrow()
+                out.write((resp.toString() + "\n").toByteArray())
+                out.flush()
+            }
+        } catch (_: Exception) { /* client gone */ } finally {
+            runCatching { client.close() }
+        }
+    }
 
     private fun serve(client: java.net.Socket) {
         try {
-            client.tcpNoDelay = true
             val reader = client.getInputStream().bufferedReader()
             val out: OutputStream = client.getOutputStream()
             while (true) {

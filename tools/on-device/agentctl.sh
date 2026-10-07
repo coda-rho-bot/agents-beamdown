@@ -1,8 +1,9 @@
 #!/system/bin/sh
 # agentctl — agent-side client for the AgentAccessibilityService command channel.
 #
-# Talks to the app's local TCP socket (127.0.0.1:8765). One JSON command per
-# invocation; response JSON on stdout. Same-uid only: the socket rejects other apps.
+# Talks to the app's local unix socket (files/agentctl.sock, mode 600). One JSON
+# command per invocation; response JSON on stdout. Same-uid only: filesystem
+# permissions + peer-credential check reject other apps.
 #
 # Commands (canonical live index: agentctl commands; full trust picture:
 #   agentctl access — filesystem probes, consent classes, session rules).
@@ -37,12 +38,11 @@
 # am/notify/keyevent work WITHOUT accessibility.
 
 set -u
-PORT=8765
 AGENT_NAME="${AGENT_NAME:-Letta agent}"
-HOST=127.0.0.1
+SOCK="${AGENTCTL_SOCK:-/data/data/com.angussoftware.letta.env/files/agentctl.sock}"
 
-send() {  # send() <<< one line of JSON
-    printf '%s\n' "$1" | /system/bin/toybox nc "$HOST" "$PORT" 2>/dev/null
+send() {  # send() <<< one line of JSON (unix socket, app-uid only)
+    printf '%s\n' "$1" | /system/bin/toybox nc -U "$SOCK" 2>/dev/null
 }
 
 case "${1:-help}" in
