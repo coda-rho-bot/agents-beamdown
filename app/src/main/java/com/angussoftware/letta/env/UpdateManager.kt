@@ -36,8 +36,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * polled by the UI's existing 2s tick; completion lands via
  * ACTION_DOWNLOAD_COMPLETE on the application context.
  *
- * Install: ACTION_VIEW application/vnd.android.package-archive with a
- * FileProvider URI. Android refuses mismatched signatures at install time,
+ * Install: ACTION_INSTALL_PACKAGE with a FileProvider URI (the dedicated
+ * install action — a generic ACTION_VIEW + APK MIME lets file managers
+ * register as handlers and hijack the tap into an "Open with" chooser).
+ * Android refuses mismatched signatures at install time,
  * so a hijacked feed can't install a different app — signature safety is
  * free. Background activity starts: the background-start restriction keys
  * on the DEVICE's Android version (Android 10+ blocks background starts
@@ -725,7 +727,13 @@ object UpdateManager {
             return false // grant missing — do NOT consume the auto guard
         }
         val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
+        // ACTION_INSTALL_PACKAGE (not ACTION_VIEW + MIME): the generic view
+        // intent lets any app that registered for the APK MIME (Acode, Termux
+        // on Harry's phone — Oct 7 live finding) hijack the tap into an
+        // "Open with" chooser. The dedicated install action is resolvable
+        // only by system package installers, so sideload updates go straight
+        // to the confirm sheet with no chooser detour.
+        val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }

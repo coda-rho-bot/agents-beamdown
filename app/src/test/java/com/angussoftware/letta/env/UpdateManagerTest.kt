@@ -284,3 +284,30 @@ class UpdateManagerTest {
         )
     }
 }
+
+    // ---- install intent (chooser-hijack guard) --------------------------------
+    // Oct 7 live finding: a generic ACTION_VIEW + APK MIME intent let file
+    // managers (Acode, Termux) register as handlers — Install opened an
+    // "Open with" chooser instead of the system installer. The dedicated
+    // ACTION_INSTALL_PACKAGE action is only resolvable by system installers.
+    // JVM tests can't build Intents (Android type), so this pins the source
+    // contract the way DocsSyncTest pins docs: fail the build if someone
+    // reverts to ACTION_VIEW for the APK install path.
+
+    @Test
+    fun installUsesDedicatedInstallActionNeverGenericView() {
+        val src = java.io.File("src/main/java/com/angussoftware/letta/env/UpdateManager.kt")
+            .takeIf { it.exists() } ?: java.io.File("../src/main/java/com/angussoftware/letta/env/UpdateManager.kt")
+        assertTrue("UpdateManager.kt not found (CWD=${java.io.File(".").absolutePath})", src.exists())
+        val text = src.readText()
+        val installBlock = text.substringAfter("fun install(context: Context): Boolean")
+        assertTrue(
+            "install() must use Intent.ACTION_INSTALL_PACKAGE — a generic ACTION_VIEW + APK MIME " +
+            "lets file managers hijack the tap into an 'Open with' chooser (Oct 7 live finding)",
+            installBlock.contains("Intent.ACTION_INSTALL_PACKAGE")
+        )
+        assertFalse(
+            "install() must not launch the APK via ACTION_VIEW — revert risk",
+            installBlock.contains("Intent(Intent.ACTION_VIEW)")
+        )
+    }
