@@ -118,24 +118,38 @@ object WatchStatusSync {
     /**
      * Phone: parse the watch's last-published status DataItem, if present.
      * Returns null when the watch has never published (fresh install).
-     * Synchronous (blocking) — call off the main thread.
+     * Synchronous (blocking) — call off the main thread. N2 (review 2698):
+     * GMS Task listeners default to the main-thread executor, so a main-thread
+     * caller would deadlock until the 10s latch cap — the off-main contract
+     * is load-bearing (single call site: daemon thread in
+     * MainActivity.probeWatchStatus).
      */
     fun parseStatusBlocking(client: DataClient): JSONObject? {
-        return try {
-            val buf = client.getDataItems(
-                android.net.Uri.Builder().scheme("wear").path(STATUS_PATH).build()
+        // F3/F4 (review 2698): buffer released in finally (a parse throw inside
+        // the loop must not leak the DataItemBuffer), and the query URI carries
+        // an explicit "*" authority — DataClient treats a host-less wear URI's
+        // path as undefined per current docs.
+        val buf = try {
+            client.getDataItems(
+                android.net.Uri.Builder().scheme("wear").authority("*").path(STATUS_PATH).build()
             ).await()
+        } catch (e: Exception) {
+            Log.w(TAG, "status read failed: ${e.message}")
+            return null
+        }
+        try {
             var out: JSONObject? = null
             for (item in buf) {
                 val map = DataMapItem.fromDataItem(item).dataMap
                 val json = map.getString("json") ?: continue
                 out = JSONObject(json)
             }
-            buf.release()
-            out
+            return out
         } catch (e: Exception) {
-            Log.w(TAG, "status read failed: ${e.message}")
-            null
+            Log.w(TAG, "status parse failed: ${e.message}")
+            return null
+        } finally {
+            buf.release()
         }
     }
 
@@ -174,13 +188,13 @@ class WatchStatusSyncListenerService : com.google.android.gms.wearable.WearableL
                     WatchStatusSync.publishStatus(app)
                 }
                 // Watch: update nudge → force feed check + foreground the app
-                // at the update card. maybeNotify posts the notification (the
-                // watch surfacing gap, todo c2a738d4382e); the launcher intent
-                // brings the update row into view.
+                // at the update card. N1 (review 2698): no maybeNotify here —
+                // it read pre-check prefs (stale); maybeCheckAsync itself
+                // notifies on new-tag discovery, and the foreground intent is
+                // what surfaces the card.
                 isWatch && path.startsWith(WatchStatusSync.NUDGE_PATH) -> {
                     Log.i(WatchStatusSync.TAG, "update nudge from phone")
                     UpdateManager.maybeCheckAsync(app, force = true)
-                    UpdateManager.maybeNotify(app)
                     runCatching {
                         val launch = packageManager.getLaunchIntentForPackage(packageName)
                         launch?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -188,7 +202,9 @@ class WatchStatusSyncListenerService : com.google.android.gms.wearable.WearableL
                     }
                 }
                 // Phone: watch status changed → re-render the card if open.
-                !isWatch && path.startsWith(WatchStatusSync.STATUS_PATH) -> {
+                // N5 (review 2698): exact-path match, not prefix — a
+                // /beamdown_watch_status_req/<ts> echo must not trigger this.
+                !isWatch && path == WatchStatusSync.STATUS_PATH -> {
                     WatchStatusSync.notifyPhoneStatusChanged()
                 }
             }

@@ -238,10 +238,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
             if (isWatch()) showMainWatch() else showMain()
         }
         // Cross-device status (Oct 7): phone re-renders the Watch card when
-        // the watch publishes; watch re-publishes on every UI signal (cheap).
-        WatchStatusSync.onStatusChanged = {
-            if (!isWatch()) renderWatchCard() else WatchStatusSync.publishStatus(this)
-        }
+        // the watch publishes. Watch branch is intentionally absent — the
+        // phone-side listener is the only notifier (N4, review 2698); the
+        // watch's own publish points are onResume + the FGS tick.
+        WatchStatusSync.onStatusChanged = { renderWatchCard() }
     }
 
     /** Watch detection: PackageManager feature flag — no build flavor needed,
@@ -1917,6 +1917,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
         // activity (review follow-up, PR #83): re-registration happens on the
         // next showOnboarding*, and null-then-fire is a safe no-op.
         WatchKeySync.onKeyDelivered = null
+        // Same class of leak, PR #105 review F2: the always-running FGS keeps
+        // the process alive indefinitely — an un-nulled onStatusChanged would
+        // pin this destroyed activity forever AND fire renderWatchCard()
+        // against its dead view tree on every watch publish while backgrounded.
+        WatchStatusSync.onStatusChanged = null
     }
 
     private var autostartDone = false
@@ -2265,7 +2270,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     btn.isEnabled = true
                 } else {
                     val v = json.optString(WatchStatusSync.FIELD_APP_VERSION, "?")
-                    val updateTag = json.optString(WatchStatusSync.FIELD_UPDATE_TAG, null)
+                    // F1 (review 2698): framework org.json coerces JSONObject.NULL
+                    // to the literal string "null" via optString — the JVM test
+                    // artifact returns the fallback instead, so this was green in
+                    // tests while every up-to-date watch rendered "null available".
+                    // isNull() is the only portable check across both artifacts.
+                    val updateTag = if (json.isNull(WatchStatusSync.FIELD_UPDATE_TAG)) null
+                                    else json.optString(WatchStatusSync.FIELD_UPDATE_TAG, null)
                     val online = json.optBoolean(WatchStatusSync.FIELD_ENV_ONLINE, false)
                     val line1 = if (online) "Watch: online (v$v)" else "Watch: offline (v$v)"
                     if (updateTag != null && updateTag.isNotEmpty()) {
