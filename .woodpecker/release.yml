@@ -314,6 +314,13 @@ steps:
                     break
                 except Exception as e:
                     print(f'{repo}: sha upload route {base} failed: {e}')
+            else:
+                # Symmetric discipline with the APK upload (review 2738 B2):
+                # a release whose sidecar failed to attach would install as
+                # REFUSE on every device (the app fail-closes on a listed
+                # but unresolvable sidecar) — or worse, pre-B2, silently
+                # unverified. A sidecar-less tag is a broken tag; fail it.
+                fatal(f'{repo}: sha256 sidecar upload failed on all routes')
         print(f'=== Release {TAG} published with {APK} on {len(REPOS)} repos ===')
         PYEOF
         python3 /tmp/publish-release.py
@@ -333,4 +340,16 @@ steps:
       # the shared android-sdk-lettaenv was writable by PR builds (shared
       # mount), letting a hostile PR trojan apksigner/zipalign and steal the
       # keystore from the next tag build (adversarial review finding R9-4).
+      # Honest scope (review 2738 B3): this closes the SHARED-MOUNT path
+      # (a PR build invisibly writing into the volume the release job
+      # executes from). It does NOT stop a hostile PR from declaring this
+      # same volume itself — repo 11 is trusted (volumes: true, per-repo
+      # trust) with allow_pr, and PR pipelines run the config from the PR
+      # head, so a pushed branch can mount android-sdk-signing-lettaenv rw
+      # in its own pipeline and trojan it at PR-open. Residual: any user
+      # with push access can plant a trojan that the next tag build runs
+      # with keystore access. Full closure options tracked as R9-4b
+      # (follow-up filed Oct 8): repo-config-extension allowlist rejecting
+      # volume declarations in PR configs / trusted-off + image-baked SDK /
+      # post-sign verifier with pinned cert sha.
       - android-sdk-signing-lettaenv:/opt/android-sdk
