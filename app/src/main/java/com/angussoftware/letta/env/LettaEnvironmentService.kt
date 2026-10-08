@@ -1956,12 +1956,19 @@ class LettaEnvironmentService : Service() {
         val installedV = runCatching {
             org.json.JSONObject(installedPkg.readText()).optString("version", "")
         }.getOrDefault("")
-        if (installedV != pinVersion) {
+        if (installedV != pinVersion && installedV.isNotEmpty()) {
             // Upgraded install — letta.js is not the pinned build's bytes.
             // Tamper protection for upgraded copies is post-install only;
             // the npm chain (set 3) owns install-time integrity.
             log("PATCH-PIN: installed $installedV != pin-version $pinVersion — pin not applied (upgraded install)")
             return true
+        }
+        if (installedV.isEmpty()) {
+            // package.json missing/corrupt: an authority install ALWAYS has a
+            // readable version — unreadable means tamper or corruption, and
+            // treating it as "upgraded" would let a corrupted package.json
+            // deactivate the pin while a tampered letta.js boots. Enforce.
+            log("PATCH-PIN: installed version unreadable — enforcing pin (fail-closed)")
         }
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js")
         val actual = runCatching { sha256Of(lettaJs) }.getOrDefault("")
