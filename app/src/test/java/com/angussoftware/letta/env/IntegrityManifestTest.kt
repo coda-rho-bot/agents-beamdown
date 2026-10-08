@@ -72,6 +72,18 @@ class IntegrityManifestTest {
     }
 
     @Test
+    fun `pin-version header parses and rejects garbage`() {
+        assertEquals(
+            "0.34.4",
+            LettaEnvironmentService.parseManifestPinVersion(
+                "# some header\n# letta.js pin-version: 0.34.4\n# more",
+            ),
+        )
+        assertEquals(null, LettaEnvironmentService.parseManifestPinVersion("# no header here"))
+        assertEquals(null, LettaEnvironmentService.parseManifestPinVersion("# letta.js pin-version: not-a-version"))
+    }
+
+    @Test
     fun `sha256Of streams correctly for known vector`() {
         val tmp = java.io.File.createTempFile("integrity", "bin")
         try {
@@ -136,6 +148,58 @@ class IntegrityManifestTest {
         )
     }
 
+    // ---------- source contract: pin ordering + fail-closed (Oct 8 set-3) ----------
+
+    @Test
+    fun `lettajs pin check runs before patching - gate then patch ordering`() {
+        val t = src("src/main/java/com/angussoftware/letta/env/LettaEnvironmentService.kt")
+        val runEnv = t.substringAfter("private fun runEnvironment(")
+        val pinAt = runEnv.indexOf("verifyLettaJsPin(")
+        val patchAt = runEnv.indexOf("applyLettaJsPatches(")
+        assertTrue(
+            "runEnvironment must call verifyLettaJsPin BEFORE applyLettaJsPatches — the pin " +
+                "covers PRE-PATCH member bytes; verifying after patching would compare patched " +
+                "bytes against the pre-patch pin and false-block every pinned boot.",
+            pinAt in 0 until patchAt,
+        )
+        // The pin's failure must BLOCK before patching runs.
+        val blockAt = runEnv.indexOf("letta.js pre-patch pin failed")
+        assertTrue(
+            "verifyLettaJsPin false must return/block before any patching (block log line missing or misplaced)",
+            blockAt in 0 until patchAt,
+        )
+    }
+
+    @Test
+    fun `upgrade path fails closed on zero patch sites`() {
+        val t = src("src/main/java/com/angussoftware/letta/env/LettaEnvironmentService.kt")
+        // upgradeLetta must be Boolean; false = do not boot the fresh install.
+        assertTrue(
+            "upgradeLetta must return Boolean (false = freshly installed state must not boot)",
+            "private fun upgradeLetta(): Boolean" in t,
+        )
+        val upg = t.substringAfter("private fun upgradeLetta(): Boolean")
+        val zeroBranch = upg.indexOf("0 patch sites in freshly installed letta.js")
+        val zeroReturn = upg.indexOf("return false", zeroBranch)
+        assertTrue(
+            "0-patch-sites branch on a FRESH npm install must return false (fail-closed), not warn",
+            zeroBranch >= 0 && zeroReturn in zeroBranch until zeroBranch + 2000,
+        )
+        val mismatchBranch = upg.indexOf("!= pinned")
+        val mismatchReturn = upg.indexOf("return false", mismatchBranch)
+        assertTrue(
+            "installed-version != pinned-resolution branch must return false (do not boot registry-swapped content)",
+            mismatchBranch >= 0 && mismatchReturn in mismatchBranch until mismatchBranch + 1000,
+        )
+        // Worker must honor false by NOT falling through to runEnvironment.
+        val worker = t.substringAfter("private fun spawnWorker(")
+        assertTrue(
+            "worker must skip launch when upgradeLetta returns false (if (!upgradeLetta()) break) — " +
+                "a bare call would boot the unpatchable install anyway",
+            "if (!upgradeLetta())" in worker,
+        )
+    }
+
     // ---------- generated asset contract ----------
 
     private fun manifestAsset(): String = src("src/main/assets/integrity-manifest.txt")
@@ -145,11 +209,12 @@ class IntegrityManifestTest {
         val entries = LettaEnvironmentService.parseIntegrityManifest(manifestAsset())
         val dests = entries.map { it.dest }.toSet()
         val required = setOf(
-            "dns-shim.js", "fs-shim.js",
+            "dns-shim.js", "fs-shim.js", "dns-forwarder.js",
             "libs/dnsport.so",
             "libs/libc.so.6", "libs/libm.so.6", "libs/libdl.so.2", "libs/libpthread.so.0",
             "libs/libgcc_s.so.1", "libs/libstdc++.so.6", "libs/libtinfo.so.6", "libs/libresolv.so.2",
             "libs/pty.node",
+            "npm/letta.js",
         )
         val missing = required - dests
         assertTrue(
@@ -160,6 +225,114 @@ class IntegrityManifestTest {
         assertTrue(entries.any { it.dest == "libs/sharp-linux-arm64.node" && it.optional })
         assertTrue(entries.any { it.dest == "libs/libvips-cpp.so.8.17.3" && it.optional })
         assertFalse(dests.any { it.contains("git-arm64") })
+    }
+
+    @Test
+    fun `lettajs pin entry carries pin-version header and real tar member`() {
+        val text = manifestAsset()
+        val entries = LettaEnvironmentService.parseIntegrityManifest(text)
+        val pin = entries.firstOrNull { it.dest == "npm/letta.js" }
+        assertTrue(
+            "npm/letta.js manifest entry required (letta.js is executed with full app " +
+                "privileges on every boot — pre-patch member pin, Oct 8 follow-up).",
+            pin != null,
+        )
+        val pinVersion = LettaEnvironmentService.parseManifestPinVersion(text)
+        assertTrue(
+            "manifest must carry '# letta.js pin-version: X.Y.Z' — the runtime pins " +
+                "letta.js only while the installed version equals it (upgrades replace the file)",
+            pinVersion != null,
+        )
+        assertTrue(
+            "npm/letta.js entry must be rootfs-sourced with an explicit tar member",
+            pin!!.source.startsWith("rootfs:") && !pin.member.isNullOrEmpty(),
+        )
+        assertTrue("letta.js pin must not be optional", !pin.optional)
+    }
+
+    @Test
+    fun `lettajs pin hash matches the pinned rootfs tar member pre-patch bytes`() {
+        // The manifest's npm/letta.js hash must equal the PRE-PATCH member
+        // bytes inside the authority rootfs.tar. Runs in CI (build.yml
+        // fetches rootfs.tar before tests); skipped when the tarball is
+        // absent locally (gitignored, ~194MB).
+        val tar = sequenceOf("src/main/assets/rootfs.tar", "../src/main/assets/rootfs.tar")
+            .map { java.io.File(it) }.firstOrNull { it.exists() }
+            ?: return
+        val entries = LettaEnvironmentService.parseIntegrityManifest(manifestAsset())
+        val pin = entries.first { it.dest == "npm/letta.js" }
+        val memberHash = java.security.MessageDigest.getInstance("SHA-256")
+        var inMember = false
+        java.util.zip.GZIPInputStream(tar.inputStream(), 1 shl 16).use { gz ->
+            val header = ByteArray(512)
+            val name = ByteArray(100)
+            val size = ByteArray(12)
+            val buf = ByteArray(1 shl 16)
+            outer@ while (true) {
+                var off = 0
+                while (off < 512) {
+                    val n = gz.read(header, off, 512 - off)
+                    if (n < 0) break@outer
+                    off += n
+                }
+                if (header.all { it == 0.toByte() }) break
+                System.arraycopy(header, 0, name, 0, 100)
+                System.arraycopy(header, 124, size, 0, 12)
+                val memberName = String(name).trimEnd('\u0000')
+                val memberSize = size.takeWhile { it != 0.toByte() }
+                    .fold(0L) { acc, b -> acc * 8 + (b - '0'.code.toByte()) }
+                val padded = (memberSize + 511) / 512 * 512
+                val wanted = "./" + (pin.member ?: "")
+                if (memberName == wanted) {
+                    var rem = memberSize
+                    while (rem > 0) {
+                        val n = gz.read(buf, 0, minOf(buf.size.toLong(), rem).toInt())
+                        if (n < 0) break@outer
+                        memberHash.update(buf, 0, n)
+                        rem -= n
+                    }
+                    inMember = true
+                    break@outer
+                }
+                var skip = padded
+                while (skip > 0) {
+                    val n = gz.read(buf, 0, minOf(buf.size.toLong(), skip).toInt())
+                    if (n < 0) break@outer
+                    skip -= n
+                }
+            }
+        }
+        assertTrue("rootfs.tar member ${pin.member} not found in stream scan", inMember)
+        val hex = memberHash.digest().joinToString("") { "%02x".format(it) }
+        assertEquals(
+            "npm/letta.js manifest hash != PRE-PATCH bytes of rootfs.tar member — " +
+                "regenerate with tools/integrity/generate-manifest.py (hash must be of " +
+                "as-extracted member bytes, before applyLettaJsPatches)",
+            pin.sha256,
+            hex,
+        )
+    }
+
+    @Test
+    fun `manifest rootfs authority sha stays lockstep with release pipeline pin`() {
+        // EXPECTED_SHA lockstep: the manifest header's rootfs.tar sha and the
+        // release pipeline's EXPECTED_SHA must name the SAME authority build.
+        // Drift either way = two "authorities" disagreeing about what the
+        // runtime restores — the exact single-authority invariant #118 built.
+        val manifestSha = Regex("rootfs\\.tar authority sha256 at generation:\\s*([0-9a-f]{64})")
+            .find(manifestAsset())?.groupValues?.get(1)
+        val rel = src("../.woodpecker/release.yml")
+        val ciSha = Regex("EXPECTED_SHA\\s*=\\s*'([0-9a-f]{64})'").find(rel)?.groupValues?.get(1)
+        assertTrue("manifest header must record the generation rootfs.tar sha256", manifestSha != null)
+        assertTrue("release.yml must pin EXPECTED_SHA", ciSha != null)
+        assertEquals(
+            "rootfs.tar authority split-brain: integrity manifest and release.yml " +
+                "EXPECTED_SHA name different builds. Update BOTH (regenerate manifest " +
+                "against the new tarball AND bump EXPECTED_SHA) whenever the rootfs is " +
+                "re-pinned — e.g. the next rootfs rebuild folding in the arm64 sharp swap.",
+            manifestSha,
+            ciSha,
+        )
     }
 
     @Test

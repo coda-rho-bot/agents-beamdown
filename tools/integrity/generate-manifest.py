@@ -14,6 +14,15 @@ AUTHORITY MODEL
 HASH ORIGINS (documented per the review):
   - dns-shim.js / fs-shim.js / dnsport.so: hashed directly from
     app/src/main/assets/ (APK assets).
+  - dns-forwarder.js: hashed from its APK asset (Oct 8 follow-up — it was
+    installed from the asset but unverified, so a tampered copy silently
+    survived every boot).
+  - letta.js PRE-PATCH member bytes: hashed from the rootfs.tar member
+    (authority = the CI-pinned rootfs build). The pin verifies bytes as
+    EXTRACTED, before applyLettaJsPatches rewrites the file — post-patch
+    bytes legitimately differ by design. Upgrades (npm) legitimately replace
+    the file; the runtime gate applies the pin only while the installed
+    package version equals the manifest header's pin-version.
   - 8 glibc libs + pty.node: streamed from members of
     app/src/main/assets/rootfs.tar — the CI-pinned authority build
     (sha256 78d4135a…, 193,863,960 bytes, letta-code 0.34.4, Oct 7 2026;
@@ -35,6 +44,7 @@ REGENERATION
 """
 
 import hashlib
+import json
 import os
 import sys
 import tarfile
@@ -44,6 +54,9 @@ ASSETS = os.path.join(ROOT, "app", "src", "main", "assets")
 SWAP = os.path.join(ROOT, "tools", "rootfs-build", "swap")
 OUT = os.path.join(ASSETS, "integrity-manifest.txt")
 ROOTFS_TAR = os.path.join(ASSETS, "rootfs.tar")
+
+LETTA_JS_MEMBER = "./usr/local/lib/node_modules/@letta-ai/letta-code/letta.js"
+LETTA_PKG_MEMBER = "./usr/local/lib/node_modules/@letta-ai/letta-code/package.json"
 
 # (dest, rootfs_source_path, tar_member_override_or_None)
 # tar_member_override: real (non-symlink) member inside rootfs.tar when the
@@ -85,6 +98,7 @@ SWAP_STAGED = [
 ASSET_FILES = [
     ("dns-shim.js", "dns-shim.js"),
     ("fs-shim.js", "fs-shim.js"),
+    ("dns-forwarder.js", "dns-forwarder.js"),
     ("libs/dnsport.so", "dnsport.so"),
 ]
 
@@ -102,6 +116,14 @@ def main():
                  f"internal/rootfs-source release or run the rootfs build)")
     rootfs_sha = sha256_stream(open(ROOTFS_TAR, "rb"))
 
+    # letta.js pin-version: the package version baked into the authority
+    # rootfs build. The runtime applies the letta.js entry only while the
+    # INSTALLED package version equals this — npm upgrades legitimately
+    # replace letta.js with unpinned bytes (set-3 exact-pin owns upgrades).
+    with tarfile.open(ROOTFS_TAR, "r:gz") as vt:
+        pkg = json.load(vt.extractfile(LETTA_PKG_MEMBER))
+        pin_version = pkg["version"]
+
     entries = []  # (dest, sha, source_spec, tar_member_or_empty, optional, provenance)
     with tarfile.open(ROOTFS_TAR, "r:gz") as rt:
         for dest, rpath, member_override in ROOTFS_LIBS:
@@ -111,6 +133,16 @@ def main():
                 sys.exit(f"FATAL: rootfs.tar member {member} not a regular file")
             entries.append((dest, sha256_stream(f), f"rootfs:{rpath}",
                             member_override or "", False, f"rootfs.tar[{member}]"))
+
+        # letta.js — PRE-PATCH authority bytes from the rootfs.tar member.
+        # Pinned as-extracted; applyLettaJsPatches rewrites the installed
+        # copy afterwards (gate-then-patch ordering). member names the real
+        # tar member so restores stream from the APK authority.
+        lf = rt.extractfile(LETTA_JS_MEMBER)
+        if lf is None:
+            sys.exit(f"FATAL: rootfs.tar member {LETTA_JS_MEMBER} not a regular file")
+        entries.append(("npm/letta.js", sha256_stream(lf), f"rootfs:{LETTA_JS_MEMBER[2:]}",
+                        LETTA_JS_MEMBER[2:], False, f"rootfs.tar[{LETTA_JS_MEMBER}] pre-patch"))
 
     for dest, rpath, tgz, member in SWAP_STAGED:
         path = os.path.join(SWAP, tgz)
@@ -142,6 +174,9 @@ def main():
         "#         APK's pinned rootfs.tar asset)",
         "# col5 'optional' = verify-if-present (build cannot restore on fresh",
         "#         installs yet); absence tolerated, wrong content still blocks.",
+        f"# letta.js pin-version: {pin_version}",
+        "#         (the letta.js entry applies only while the installed",
+        "#          package version equals this; upgrades replace the file)",
         f"# rootfs.tar authority sha256 at generation: {rootfs_sha}",
         "# runtime parses the APK asset only; the filesDir copy is diagnostics.",
         "# git-arm64.tar.gz is intentionally NOT listed (payload-resilience +",

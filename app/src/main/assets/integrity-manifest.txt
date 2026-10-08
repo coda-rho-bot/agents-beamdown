@@ -6,10 +6,15 @@
 #         APK's pinned rootfs.tar asset)
 # col5 'optional' = verify-if-present (build cannot restore on fresh
 #         installs yet); absence tolerated, wrong content still blocks.
+# letta.js pin-version: 0.34.4
+#         (the letta.js entry applies only while the installed
+#          package version equals this; upgrades replace the file)
 # rootfs.tar authority sha256 at generation: 78d4135a33a84c716c5e222435b5f612c44ad73ce15101ea19c291a49e23072c
 # runtime parses the APK asset only; the filesDir copy is diagnostics.
 # git-arm64.tar.gz is intentionally NOT listed (payload-resilience +
 # self-heal download own it; not hashed at runtime).
+dns-forwarder.js	cfdd5a9783d6f765a496ecbba4111579152023a54afc5e9b67b0952640ab92f5	asset:dns-forwarder.js
+# provenance: apk-asset[dns-forwarder.js]
 dns-shim.js	d0afa6671e11b7d240546ec6f15c9eb51f5350e43745976b5961a311b815b1b2	asset:dns-shim.js
 # provenance: apk-asset[dns-shim.js]
 fs-shim.js	ce5f53990f22663db86782e72a270d42b0774e11913af277c73fbab6f48ba3e6	asset:fs-shim.js
@@ -38,3 +43,5 @@ libs/pty.node	6757b266205562cb8b5154692f0ed51b129a9158639dc4988d92638dd630ea5e	r
 # provenance: rootfs.tar[./usr/local/lib/node_modules/@letta-ai/letta-code/node_modules/node-pty/build/Release/pty.node]
 libs/sharp-linux-arm64.node	95406e4cc71bf1d9f5b6f13c3e6db7bab5b7e71a7f003ccce27efc7a2780ff0b	rootfs:usr/local/lib/node_modules/@letta-ai/letta-code/node_modules/@img/sharp-linux-arm64/lib/sharp-linux-arm64.node	optional
 # provenance: swap/img-sharp-linux-arm64-0.34.5.tgz[package/lib/sharp-linux-arm64.node]
+npm/letta.js	6fa66c6988fe83cd4a85dabcf96475ac37aa5a73122e0c9ed591df66d990586d	rootfs:usr/local/lib/node_modules/@letta-ai/letta-code/letta.js	usr/local/lib/node_modules/@letta-ai/letta-code/letta.js
+# provenance: rootfs.tar[./usr/local/lib/node_modules/@letta-ai/letta-code/letta.js] pre-patch

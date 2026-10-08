@@ -127,6 +127,17 @@ class LettaEnvironmentService : Service() {
             return out
         }
 
+        /**
+         * Parse the letta.js pin-version from the manifest header
+         * (`# letta.js pin-version: X.Y.Z`, written by the generator). Null =
+         * header absent (old manifest → pin inactive) or malformed.
+         */
+        internal fun parseManifestPinVersion(text: String): String? =
+            text.lineSequence()
+                .firstOrNull { it.trim().startsWith("# letta.js pin-version:") }
+                ?.substringAfter(':')?.trim()
+                ?.takeIf { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
+
         /** Chunked-stream sha256 (never loads whole files into memory). */
         internal fun sha256Of(f: File): String {
             val md = MessageDigest.getInstance("SHA-256")
@@ -489,7 +500,16 @@ class LettaEnvironmentService : Service() {
                 while (true) {
                     if (doUpgrade) {
                         try {
-                            upgradeLetta()
+                            if (!upgradeLetta()) {
+                                // Fail-closed upgrade (Oct 8 set-3 follow-up):
+                                // upgradeLetta reports an install that must
+                                // NOT be booted (0 patch sites on a fresh
+                                // file, or installed-version != pinned).
+                                // Status already reflects the failure; going
+                                // idle without launching is the block.
+                                log("UPGRADE: fail-closed — not launching after failed upgrade")
+                                break
+                            }
                         } catch (t: Throwable) {
                             log("UPGRADE FATAL: ${t.message}")
                             setStatus("upgrade failed: ${t.message ?: t.javaClass.simpleName}")
@@ -619,7 +639,7 @@ class LettaEnvironmentService : Service() {
      * Android-specific letta.js patches (SELinux forbids the hardlink-based
      * locks), then hand back to runEnvironment() to relaunch the server.
      */
-    private fun upgradeLetta() {
+    private fun upgradeLetta(): Boolean {
         val libDir = File(applicationInfo.nativeLibraryDir)
         val libLoader = File(libDir, "libldlnx.so")
         val rootfsDir = File(filesDir, "rootfs")
@@ -693,7 +713,7 @@ class LettaEnvironmentService : Service() {
             log("UPGRADE: failed to resolve latest version — aborting upgrade")
             setStatus("upgrade failed: version resolve")
             updateNotification("Upgrade failed")
-            return
+            return true // npm never ran — previous (patched) install is intact; boot it
         }
         log("UPGRADE: resolved latest = $resolved; installing exact pin")
         val pb = ProcessBuilder(
@@ -710,7 +730,7 @@ class LettaEnvironmentService : Service() {
         val p = try { pb.start() } catch (t: Throwable) {
             log("UPGRADE: npm failed to start: ${t.message}")
             setStatus("upgrade failed: ${t.message}")
-            return
+            return true // previous install untouched — safe to boot
         }
         // Stream npm output into server.log.
         val reader = Thread {
@@ -724,7 +744,7 @@ class LettaEnvironmentService : Service() {
             log("UPGRADE: npm timed out after 10 minutes")
             setStatus("upgrade failed: npm timeout")
             updateNotification("Upgrade failed")
-            return
+            return true // npm killed mid-flight; previous install likely intact — boot it
         }
         val npmExit = p.exitValue()
         log("UPGRADE: npm exit code $npmExit")
@@ -740,14 +760,14 @@ class LettaEnvironmentService : Service() {
                 log("UPGRADE: SECURITY — installed version $installedV != pinned $resolved; rolling back")
                 setStatus("upgrade failed: version mismatch")
                 updateNotification("Upgrade failed")
-                return
+                return false // registry served a different version than resolved — do NOT boot it
             }
         }
         if (npmExit != 0) {
             log("UPGRADE: npm FAILED — restarting with whatever is installed (npm usually leaves the previous version intact)")
             setStatus("npm failed (exit $npmExit) — restarting")
             updateNotification("Upgrade failed — restarting")
-            return
+            return true // npm failed before replacing the install — boot whatever survived
         }
 
         // 3. Re-apply Android patches to the fresh letta.js (hardlink locks
@@ -760,15 +780,26 @@ class LettaEnvironmentService : Service() {
         // the link rewrites must NOT run when the shim is deployed.
         val applied = applyLettaJsPatches(nodeModules, linksHandled = true)
         if (applied == 0) {
-            log("UPGRADE: WARNING — 0 patch sites found in new letta.js; " +
-                "lock-file hardlinks will fail under SELinux. Upstream code changed — " +
-                "update the patch patterns in the service AND patch-binaries.py.")
+            // Fail-closed (Oct 8 set-3 follow-up): npm JUST wrote this file,
+            // so 0 sites means the patcher no longer matches upstream (not
+            // "already patched" — fresh install has no prior boot). The
+            // launcher/interpreter patches are load-bearing for Bash and
+            // git hooks; booting unpatched bricks sessions silently. Keep
+            // the previously-running install; the user sees the failure.
+            log("UPGRADE: SECURITY — 0 patch sites in freshly installed letta.js; " +
+                "patcher broken vs upstream. Not restarting into the new version " +
+                "(previous install kept; update the patch patterns in the service " +
+                "AND patch-binaries.py).")
+            setStatus("upgrade failed: 0 patch sites")
+            updateNotification("Upgrade failed — patch")
+            return false // fresh-but-unpatchable letta.js must not boot
         }
 
         val after = currentVersion()
         log("UPGRADE: $before -> $after")
         setStatus("upgraded to $after — restarting")
         updateNotification("Upgraded to $after — restarting")
+        return true
     }
 
     /**
@@ -1001,12 +1032,46 @@ class LettaEnvironmentService : Service() {
             return
         }
 
+        // letta.js PRE-PATCH pin (Oct 8 set-3 follow-up): verify the member
+        // bytes BEFORE any patching rewrites the file (gate-then-patch). On
+        // pinned-version installs a wrong/missing letta.js is restored from
+        // the rootfs.tar authority; unrestorable → block boot.
+        val manifestTextForPin = runCatching {
+            assets.open("integrity-manifest.txt").bufferedReader().use { it.readText() }
+        }.getOrDefault("")
+        if (!verifyLettaJsPin(rootfsDir, manifestTextForPin)) {
+            setStatus("failed: letta.js integrity")
+            updateNotification("Integrity: letta.js")
+            log("SECURITY: letta.js pre-patch pin failed — Launch blocked.")
+            return
+        }
+
         // Re-apply letta.js patches on every start: npm-upgraded installs
         // (upgrade button) land unpatched until the NEXT upgrade, and the
         // launcher/interpreter fixes are load-bearing for the Bash tool.
         // fs-shim handles link() at runtime; on fresh installs skip the
         // link-string patches entirely (they conflict — see upgrade path).
-        applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"), linksHandled = true)
+        val startApplied = applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"), linksHandled = true)
+        if (startApplied == 0) {
+            // Fail-closed ONLY when the pin just verified authority bytes
+            // (unpatched by construction) — 0 sites there means the patcher
+            // no longer matches upstream, which would brick Bash/hooks.
+            // Upgraded installs (pin not applied) keep warning-only: 0 can
+            // mean "already patched by a previous boot".
+            val pinWasApplied = runCatching {
+                val installedV = org.json.JSONObject(
+                    File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/package.json").readText()
+                ).optString("version", "")
+                installedV == parseManifestPinVersion(manifestTextForPin)
+            }.getOrDefault(false)
+            if (pinWasApplied) {
+                log("SECURITY: 0 patch sites after pin-verified authority restore — patcher broken vs upstream. Blocking boot.")
+                setStatus("failed: letta.js patch")
+                updateNotification("Patch failed")
+                return
+            }
+            log("PATCH: 0 sites on unpinned (upgraded) install — warning only")
+        }
 
         val libPath = libDir.absolutePath
         val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
@@ -1357,6 +1422,10 @@ class LettaEnvironmentService : Service() {
         // per-entry scans would re-decompress the 194MB tarball per file.
         val tarRestores = LinkedHashMap<File, String>() // dst -> member
         for (e in manifest) {
+            // npm/ entries (letta.js pin) are NOT filesDir-relative installs:
+            // the pin check owns that file (see verifyLettaJsPin) — the
+            // generic loop would copy it to the wrong location.
+            if (e.dest.startsWith("npm/")) continue
             val dst = File(filesDir, e.dest)
             dst.parentFile?.mkdirs()
             // Healthy cache: bytes already match authority — leave untouched.
@@ -1532,12 +1601,10 @@ class LettaEnvironmentService : Service() {
             }
             shim.setExecutable(true, false)
         }
-        // dnsport.so now installs via the integrity manifest pass (sha256
-        // verified against the APK asset) — see the manifest loop above.
-        val dnsForwarder = File(filesDir, "dns-forwarder.js")
-        assets.open("dns-forwarder.js").use { input ->
-            dnsForwarder.outputStream().use { output -> input.copyTo(output) }
-        }
+        // dnsport.so and dns-forwarder.js now install via the integrity
+        // manifest pass (sha256 verified against the APK asset) — see the
+        // manifest loop above. (dns-forwarder.js joined the manifest in the
+        // Oct 8 set-3 follow-up: it was previously copied unverified.)
         log("git ELF chain installed (git-elf, gc-shim, dnsport.so, dns-forwarder.js)")
 
 
@@ -1853,6 +1920,65 @@ class LettaEnvironmentService : Service() {
             }
         }
         return null
+    }
+
+    /**
+     * letta.js PRE-PATCH pin (Oct 8 set-3 follow-up, per review discussion).
+     *
+     * The pin target is the letta.js member bytes AS EXTRACTED from the
+     * pinned rootfs.tar — applyLettaJsPatches rewrites the file afterwards,
+     * so post-patch bytes legitimately differ from the pin. Ordering is
+     * gate-then-patch: this check runs BEFORE any patching.
+     *
+     * Version scoping: npm upgrades legitimately replace letta.js with
+     * unpinned bytes (set-3's exact-pin + version-assert owns that path).
+     * The pin applies ONLY while the installed package version equals the
+     * manifest's pin-version header. While it applies:
+     *   - missing file            → restore from the rootfs.tar member
+     *   - hash mismatch           → restore from the rootfs.tar member
+     *                               (rollback of in-place tampering; a legit
+     *                               upgrade would have bumped the version)
+     *   - restore fails           → BLOCK boot (fail-closed)
+     * Returns false = boot must be blocked.
+     */
+    private fun verifyLettaJsPin(rootfsDir: File, manifestText: String): Boolean {
+        val entries = parseIntegrityManifest(manifestText)
+        val entry = entries.firstOrNull { it.dest == "npm/letta.js" } ?: run {
+            log("PATCH-PIN: no npm/letta.js manifest entry (old manifest?) — pin inactive")
+            return true
+        }
+        val pinVersion = parseManifestPinVersion(manifestText)
+        if (pinVersion == null) {
+            log("PATCH-PIN: manifest has letta.js entry but no pin-version header — pin inactive (generator regen needed)")
+            return true
+        }
+        val installedPkg = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/package.json")
+        val installedV = runCatching {
+            org.json.JSONObject(installedPkg.readText()).optString("version", "")
+        }.getOrDefault("")
+        if (installedV != pinVersion) {
+            // Upgraded install — letta.js is not the pinned build's bytes.
+            // Tamper protection for upgraded copies is post-install only;
+            // the npm chain (set 3) owns install-time integrity.
+            log("PATCH-PIN: installed $installedV != pin-version $pinVersion — pin not applied (upgraded install)")
+            return true
+        }
+        val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js")
+        val actual = runCatching { sha256Of(lettaJs) }.getOrDefault("")
+        if (actual != entry.sha256) {
+            log("PATCH-PIN: letta.js ${if (lettaJs.exists()) "hash mismatch" else "missing"} on pinned install — " +
+                "restoring authority bytes (in-place tamper or stale patch state)")
+            val ok = extractRootfsTarMembers(mapOf(lettaJs to ("./" + (entry.member ?: entry.source.removePrefix("rootfs:")))))[lettaJs] == true &&
+                sha256Of(lettaJs) == entry.sha256
+            if (!ok) {
+                log("SECURITY: PATCH-PIN restore failed or restored bytes still wrong — blocking boot")
+                return false
+            }
+            log("PATCH-PIN: authority bytes restored")
+            return true
+        }
+        log("PATCH-PIN: letta.js pre-patch pin verified ($actual)")
+        return true
     }
 
     /**
