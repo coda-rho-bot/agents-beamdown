@@ -797,6 +797,30 @@ class LettaEnvironmentService : Service() {
             log("Env name failed sink validation; launch blocked. Re-enter it in the app.")
             return
         }
+
+        // Security (Oct 8 set 2): files/libs is in the loader search path AND
+        // agent-writable. installSupportFiles now verify-or-restores, but a
+        // hostile turn can write AFTER install and BEFORE launch within one
+        // session. Final gate: enumerate files/libs and refuse to launch if
+        // it holds anything outside the expected set (unknown file = planted
+        // payload; known-name-but-wrong-content handled by the restore pass).
+        val filesLibsDir = File(filesDir, "libs")
+        if (filesLibsDir.isDirectory) {
+            val expected = hashSetOf(
+                "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
+                "libgcc_s.so.1", "libstdc++.so.6", "libtinfo.so.6", "libresolv.so.2",
+                "pty.node", "sharp-linux-arm64.node", "libvips-cpp.so.8.17.3",
+                "dnsport.so"
+            )
+            val foreign = filesLibsDir.listFiles()?.map { it.name }?.filter { it !in expected }.orEmpty()
+            if (foreign.isNotEmpty()) {
+                setStatus("integrity check failed — unexpected files in libs")
+                updateNotification("Integrity: foreign files removed")
+                log("SECURITY: foreign files in files/libs (planted?): $foreign — removed, launch blocked this attempt. A hostile agent turn may have attempted a preload implant.")
+                foreign.forEach { File(filesLibsDir, it).delete() }
+                return
+            }
+        }
         if (apiKey().isBlank()) {
             setStatus("no api key — open the app to configure")
             updateNotification("Needs API key")
@@ -1203,8 +1227,21 @@ class LettaEnvironmentService : Service() {
             for (n in names) {
                 val dst = File(filesLibs, n)
                 val src = File(dir, n)
-                if (src.exists() && !dst.exists()) {
-                    src.copyTo(dst)
+                // Security (Oct 8 review, set 2): files/libs sits in the
+                // agent-writable loader search path. A hostile turn could
+                // drop a trojaned libstdc++.so.6 here and own every later
+                // boot. Skip-if-exists preserved whatever was there. Now:
+                // verify byte-equality against the rootfs source (the
+                // trusted copy) and REPLACE on mismatch — the writable copy
+                // is a cache of a trusted file, never a source of truth.
+                if (src.exists() && (!dst.exists() || dst.length() != src.length())) {
+                    src.copyTo(dst, overwrite = true)
+                } else if (src.exists() && dst.exists()) {
+                    // length matches — full byte compare (small files, rare path)
+                    if (!src.inputStream().use { s -> dst.inputStream().use { d -> s.readBytes().contentEquals(d.readBytes()) } }) {
+                        log("integrity: $n in files/libs tampered — restoring from rootfs")
+                        src.copyTo(dst, overwrite = true)
+                    }
                 }
             }
         }
@@ -1217,17 +1254,23 @@ class LettaEnvironmentService : Service() {
         )
         for (a in addons) {
             val dst = File(filesLibs, a.name)
-            if (a.exists() && !dst.exists()) a.copyTo(dst)
+            // Security (set 2): verify-or-restore (same policy as the glibc
+            // libs above — the rootfs copy is trusted, files/libs is a cache).
+            if (a.exists() && (!dst.exists() || dst.length() != a.length())) {
+                a.copyTo(dst, overwrite = true)
+            }
         }
         log("files/libs populated: ${filesLibs.listFiles()?.size} files")
 
+        // Security (set 2): the shims are preloaded into EVERY server
+        // process (NODE_OPTIONS --require). Skip-if-exists let a tampered
+        // shim persist across reinstalls. Always rewrite from the immutable
+        // APK asset — same policy as fs-shim below.
         val shim = File(filesDir, "dns-shim.js")
-        if (!shim.exists()) {
-            assets.open("dns-shim.js").use { input ->
-                shim.outputStream().use { output -> input.copyTo(output) }
-            }
-            log("dns-shim.js installed")
+        assets.open("dns-shim.js").use { input ->
+            shim.outputStream().use { output -> input.copyTo(output) }
         }
+        log("dns-shim.js installed (always-rewrite)")
 
         // fs-shim.js — replaces link()/linkSync() with O_EXCL-write emulation
         // (SELinux denies hard links on app storage; letta.js uses
