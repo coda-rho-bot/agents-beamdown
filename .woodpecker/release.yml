@@ -162,6 +162,9 @@ steps:
         TAGV="${CI_COMMIT_TAG##*/}"
         [ "v$VN" = "$TAGV" ] || { echo "FATAL: tag $TAGV != versionName $VN (updater would never see this release)"; exit 1; }
         echo "versionCode=$VC versionName=$VN tag=$TAGV (previous-versionCode check: manual gate; no jq in image)"
+        # set 4: fail loud if the signing toolchain is missing (cold volume)
+        # — never silently skip verification.
+        [ -x "$ANDROID_HOME/build-tools/36.0.0/apksigner" ] || { echo "FATAL: apksigner missing on signing volume — bootstrap it (sdkmanager build-tools;36.0.0) before tagging"; exit 1; }
         $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
         mv "$APK" "agents-beamdown-${CI_COMMIT_TAG##*/}.apk"
       # Create the Forgejo release + attach the APK — TWICE, dual-publish:
@@ -256,6 +259,43 @@ steps:
             if resp.status not in (200, 201):
                 raise RuntimeError(f'{resp.status}: {body[:300]}')
             print(f'{repo}: APK uploaded (route={base}, status={resp.status})')
+        # Security (Oct 8 set 4): attach a sha256 sidecar next to the APK.
+        # The app's updater fetches it and verifies the downloaded APK
+        # before firing the installer — a feed/CDN swap is then caught at
+        # install time even before Android's signature check.
+        import hashlib as _hl
+        h = _hl.sha256()
+        with open(APK, 'rb') as f:
+            for chunk in iter(lambda: f.read(1 << 20), b''):
+                h.update(chunk)
+        apk_sha = h.hexdigest()
+        sha_name = os.path.basename(APK) + '.sha256'
+        sha_tmp = '/tmp/' + sha_name
+        with open(sha_tmp, 'w') as f:
+            f.write(apk_sha + '  ' + os.path.basename(APK) + '\n')
+        print(f'APK sha256: {apk_sha}')
+        def upload_sha(base, repo, rel_id):
+            with open(sha_tmp, 'rb') as f:
+                data = f.read()
+            u = urlsplit(base)
+            cls2 = http.client.HTTPSConnection if u.scheme == 'https' else http.client.HTTPConnection
+            conn2 = cls2(u.hostname, u.port or (443 if u.scheme == 'https' else 80), timeout=120)
+            boundary2 = '----angusci' + os.urandom(8).hex()
+            head2 = (f'--{boundary2}\r\n'
+                     f'Content-Disposition: form-data; name="attachment"; filename="{sha_name}"\r\n'
+                     f'Content-Type: text/plain\r\n\r\n').encode()
+            tail2 = f'\r\n--{boundary2}--\r\n'.encode()
+            conn2.putrequest('POST', f'{u.path}/{repo}/releases/{rel_id}/assets')
+            conn2.putheader('User-Agent', HDRS['User-Agent'])
+            conn2.putheader('Authorization', HDRS['Authorization'])
+            conn2.putheader('Content-Type', 'multipart/form-data; boundary=' + boundary2)
+            conn2.putheader('Content-Length', str(len(head2) + len(data) + len(tail2)))
+            conn2.endheaders()
+            conn2.send(head2); conn2.send(data); conn2.send(tail2)
+            resp2 = conn2.getresponse(); body2 = resp2.read().decode(errors='replace')
+            if resp2.status not in (200, 201):
+                raise RuntimeError(f'{resp2.status}: {body2[:200]}')
+            print(f'{repo}: sha256 sidecar uploaded')
         for repo in REPOS:
             rel_id = release_id_for(repo)
             if rel_id is None:
@@ -268,6 +308,12 @@ steps:
                     print(f'{repo}: upload route {base} failed: {e}')
             else:
                 fatal(f'{repo}: APK upload failed on all routes')
+            for base in ROUTES:
+                try:
+                    upload_sha(base, repo, rel_id)
+                    break
+                except Exception as e:
+                    print(f'{repo}: sha upload route {base} failed: {e}')
         print(f'=== Release {TAG} published with {APK} on {len(REPOS)} repos ===')
         PYEOF
         python3 /tmp/publish-release.py
@@ -283,4 +329,8 @@ steps:
     volumes:
       - gradle-cache-lettaenv:/root/.gradle/caches
       - gradle-wrapper-lettaenv:/root/.gradle/wrapper
-      - android-sdk-lettaenv:/opt/android-sdk
+      # Security (Oct 8 set 4): signing pipeline gets its OWN sdk volume —
+      # the shared android-sdk-lettaenv was writable by PR builds (shared
+      # mount), letting a hostile PR trojan apksigner/zipalign and steal the
+      # keystore from the next tag build (adversarial review finding R9-4).
+      - android-sdk-signing-lettaenv:/opt/android-sdk

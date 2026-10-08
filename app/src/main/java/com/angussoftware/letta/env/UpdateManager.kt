@@ -62,6 +62,7 @@ object UpdateManager {
     // ---- prefs (shared with MainActivity / LettaEnvironmentService) ----
     const val PREF_UPDATE_TAG = "update_tag"           // latest newer tag, e.g. "v0.4.0"
     const val PREF_UPDATE_URL = "update_url"           // APK asset browser_download_url
+    const val PREF_UPDATE_SHA_URL = "update_sha_url"   // .sha256 sidecar URL (set 4)
     const val PREF_UPDATE_MODE = "update_mode"         // MODE_PROMPT | MODE_AUTO_OVERNIGHT
     const val PREF_LAST_CHECK = "update_last_check_ms"
     const val PREF_DL_ID = "update_dl_id"              // DownloadManager enqueue id
@@ -104,7 +105,7 @@ object UpdateManager {
     private val receiverRegistered = AtomicBoolean(false)
 
     /** Release as published on the feed. apkUrl null = release carries no APK asset. */
-    data class ReleaseInfo(val tag: String, val apkUrl: String?, val notes: String)
+    data class ReleaseInfo(val tag: String, val apkUrl: String?, val notes: String, val sha256Url: String? = null, val apkSize: Long = -1)
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(LettaEnvironmentService.PREFS, Context.MODE_PRIVATE)
@@ -141,20 +142,25 @@ object UpdateManager {
             val tag = obj.optString("tag_name").trim()
             if (tag.isEmpty()) return null
             var apkUrl: String? = null
+            var shaUrl: String? = null
             var bestSize = -1L
             val assets = obj.optJSONArray("assets")
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val a = assets.optJSONObject(i) ?: continue
-                    if (!a.optString("name").endsWith(".apk")) continue
-                    val size = a.optLong("size", -1)
-                    if (size > bestSize) {
-                        bestSize = size
-                        apkUrl = a.optString("browser_download_url")
+                    val nm = a.optString("name")
+                    if (nm.endsWith(".apk")) {
+                        val size = a.optLong("size", -1)
+                        if (size > bestSize) {
+                            bestSize = size
+                            apkUrl = a.optString("browser_download_url")
+                        }
+                    } else if (nm.endsWith(".apk.sha256")) {
+                        shaUrl = a.optString("browser_download_url")
                     }
                 }
             }
-            ReleaseInfo(tag, apkUrl, obj.optString("body"))
+            ReleaseInfo(tag, apkUrl, obj.optString("body"), shaUrl, bestSize)
         } catch (_: Exception) {
             null
         }
@@ -290,6 +296,7 @@ object UpdateManager {
                             prefs(app).edit()
                                 .putString(PREF_UPDATE_TAG, rel.tag)
                                 .putString(PREF_UPDATE_URL, rel.apkUrl)
+                                .putString(PREF_UPDATE_SHA_URL, rel.sha256Url ?: "")
                                 .apply()
                             // First discovery of a new tag → notify promptly
                             // (don't wait for the next 30-min periodic tick)
@@ -548,10 +555,31 @@ object UpdateManager {
      * metered guard stays for every NON-interactive path: the overnight
      * auto-update and feed-triggered prefetches keep allowMetered=false.
      */
+    // Security (set 4): expected sha256 for the pending download, persisted
+    // at enqueue time from the feed's .sha256 sidecar (empty = sidecar absent
+    // → legacy releases install with a logged warning; new releases all carry it).
+    const val PREF_DL_SHA = "update_dl_sha256"
+
+    /** Fetch the .sha256 sidecar (small text) and persist the expected hex. */
+    private fun fetchExpectedSha(context: Context): String? {
+        val url = prefs(context).getString(PREF_UPDATE_SHA_URL, null)?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 15000; conn.readTimeout = 15000
+            if (conn.responseCode != 200) { conn.disconnect(); return null }
+            val hex = conn.inputStream.bufferedReader().use { it.readLine().orEmpty() }.trim()
+            conn.disconnect()
+            if (hex.matches(Regex("^[0-9a-fA-F]{64}"))) hex.lowercase() else null
+        }.getOrNull()
+    }
+
     fun enqueueDownload(context: Context, allowMetered: Boolean = false): Boolean {
         val app = context.applicationContext
         val p = prefs(app)
         val url = p.getString(PREF_UPDATE_URL, null) ?: return false
+        // set 4: resolve expected sha at enqueue (network op, small file)
+        val expectedSha = fetchExpectedSha(context)
+        p.edit().putString(PREF_DL_SHA, expectedSha ?: "").apply()
         val tag = p.getString(PREF_UPDATE_TAG, null) ?: return false
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle("Agents Beamdown $tag")
@@ -723,6 +751,36 @@ object UpdateManager {
         if (!p.getBoolean(PREF_DL_DONE, false)) return false
         val file = downloadedFile(app) ?: return false
         if (!file.exists()) return false
+        // Security (Oct 8 set 4): verify the downloaded APK against the
+        // sha256 published in the feed BEFORE handing it to the installer.
+        // A compromised feed/CDN serving different bytes under the same tag
+        // is caught here (Android's signature check remains the last line
+        // for cross-signer swaps; this catches same-signer content swaps a
+        // compromised signing key or feed would enable).
+        val expectedSha = p.getString(PREF_DL_SHA, "").orEmpty()
+        if (expectedSha.isNotEmpty()) {
+            val actual = runCatching {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                file.inputStream().use { ins ->
+                    val buf = ByteArray(1 shl 20)
+                    while (true) {
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        md.update(buf, 0, n)
+                    }
+                }
+                md.digest().joinToString("") { "%02x".format(it) }
+            }.getOrDefault("")
+            if (!actual.equals(expectedSha, ignoreCase = true)) {
+                android.util.Log.e("UpdateManager", "APK sha256 MISMATCH: expected $expectedSha got $actual — refusing install, dropping download")
+                file.delete()
+                p.edit().remove(PREF_DL_ID).remove(PREF_DL_SHA).putBoolean(PREF_DL_DONE, false).apply()
+                return false
+            }
+            android.util.Log.i("UpdateManager", "APK sha256 verified ($actual)")
+        } else {
+            android.util.Log.w("UpdateManager", "no sha256 sidecar for this release — installing without content verify (pre-sidecar release?)")
+        }
         if (!app.packageManager.canRequestPackageInstalls()) {
             runCatching {
                 app.startActivity(
