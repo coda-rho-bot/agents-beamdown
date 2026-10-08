@@ -79,8 +79,9 @@ if [ ! -x "$PROOT" ]; then
         tar -xzf "$DX_FILES/proot-aarch64.tar.gz" -C "$PLUGINS" || die "proot extract failed"
     else
         TARBALL="$DX_FILES/tmp/proot-aarch64.tar.gz"
+        # pinned (set 3): env override removed — a hostile turn could redirect payloads
         curl -sSL --max-time 120 -o "$TARBALL" \
-            "${DX_PLUGIN_URL:-https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/proot-aarch64.tar.gz}" \
+            "https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/proot-aarch64.tar.gz" \
             || die "proot download failed"
         tar -xzf "$TARBALL" -C "$PLUGINS" || die "proot extract failed"
         rm -f "$TARBALL"
@@ -102,8 +103,9 @@ if [ ! -x "$GUEST_GIT" ]; then
         fi
     else
         TARBALL="$DX_FILES/tmp/git-arm64.tar.gz"
+        # pinned (set 3): env override removed — a hostile turn could redirect payloads
         curl -sSL --max-time 300 -o "$TARBALL" \
-            "${DX_GIT_URL:-https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/git-arm64.tar.gz}" \
+            "https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/git-arm64.tar.gz" \
             || die "git payload download failed"
         tar -xzf "$TARBALL" -C "$ROOTFS" || die "git payload extract failed"
         rm -f "$TARBALL"

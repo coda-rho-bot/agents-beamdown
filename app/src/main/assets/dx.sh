@@ -3,7 +3,7 @@
 # v3: -0 fake-root, TMPDIR=/tmp2 (stale-tmpfs shadow), /sdcard bind, libc6 hold.
 set -u
 DX_FILES="${DX_FILES:-/data/user/0/com.angussoftware.letta.env/files}"
-DX_PLUGIN_URL="${DX_PLUGIN_URL:-https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/proot-aarch64.tar.gz}"
+DX_PLUGIN_URL="https://github.com/coda-rho-bot/agents-beamdown/releases/download/plugins-v1/proot-aarch64.tar.gz"  # pinned (set 3)
 ROOTFS="$DX_FILES/rootfs"
 PLUGINS="$DX_FILES/plugins"
 PROOT="$PLUGINS/proot-aarch64/bin/proot"

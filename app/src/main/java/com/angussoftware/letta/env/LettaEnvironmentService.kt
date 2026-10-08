@@ -645,26 +645,68 @@ class LettaEnvironmentService : Service() {
         // 2. npm install -g @letta-ai/letta-code@latest via the loader chain.
         //    --ignore-scripts: postinstall spawns `node` via process.execPath,
         //    which is the loader invocation here and cannot be re-spawned raw.
+        // Security (Oct 8 set 3, adversarial review): the agent shell shares
+        // this uid and can write rootfs/root/.npmrc — a poisoned
+        // `registry=https://evil/` line made the next upgrade install
+        // attacker code with full app privileges. Hardening:
+        //  - HOME = a scratch dir created fresh per upgrade (cleared first —
+        //    nothing the agent staged survives into npm's config discovery)
+        //  - registry pinned on the CLI (npm_config_registry env beats both
+        //    .npmrc files) to the official https endpoint
+        //  - userconfig pointed at the scratch dir (no user .npmrc read)
+        val npmHome = File(filesDir, "npm-home").apply {
+            deleteRecursively(); mkdirs()
+        }
         val npmEnv = mapOf(
-            "HOME" to File(rootfsDir, "root").absolutePath,
+            "HOME" to npmHome.absolutePath,
             "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
             "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
             "SHELL" to File(File(filesDir, "bin"), "bash").absolutePath,
             "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
             "NODE_OPTIONS" to "--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}",
-            "UV_USE_IO_URING" to "0"
+            "UV_USE_IO_URING" to "0",
+            "npm_config_registry" to "https://registry.npmjs.org/",
+            "npm_config_userconfig" to File(npmHome, ".npmrc").absolutePath,
+            "npm_config_strict_ssl" to "true"
         )
+        // Security (set 3): resolve @latest to an EXACT version first, then
+        // install that exact version. A swapped-tag attack (registry serves
+        // version X in the manifest, different content in the tarball) can
+        // still theoretically diverge, but exact-pin + post-install version
+        // assert (below) makes the common downgrade/redirect paths loud.
+        val resolvePb = ProcessBuilder(
+            libLoader.absolutePath, "--library-path", npmEnv["LD_LIBRARY_PATH"]!!,
+            File(libDir, "libnode.so").absolutePath, npmCli.absolutePath,
+            "view", "@letta-ai/letta-code", "version"
+        ).apply {
+            environment().clear()
+            environment().putAll(npmEnv)
+            redirectErrorStream(true)
+        }
+        val resolved = try {
+            val rp = resolvePb.start()
+            val out = rp.inputStream.bufferedReader().readText().trim()
+            rp.waitFor(60, TimeUnit.SECONDS)
+            out.lineSequence().lastOrNull { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
+        } catch (t: Throwable) { null }
+        if (resolved == null) {
+            log("UPGRADE: failed to resolve latest version — aborting upgrade")
+            setStatus("upgrade failed: version resolve")
+            updateNotification("Upgrade failed")
+            return
+        }
+        log("UPGRADE: resolved latest = $resolved; installing exact pin")
         val pb = ProcessBuilder(
             libLoader.absolutePath, "--library-path", npmEnv["LD_LIBRARY_PATH"]!!,
             File(libDir, "libnode.so").absolutePath, npmCli.absolutePath,
-            "install", "-g", "@letta-ai/letta-code@latest", "--ignore-scripts",
+            "install", "-g", "@letta-ai/letta-code@$resolved", "--ignore-scripts",
             "--prefix", File(rootfsDir, "usr/local").absolutePath
         ).apply {
             environment().clear()
             environment().putAll(npmEnv)
             redirectErrorStream(true)
         }
-        log("UPGRADE: running npm install @letta-ai/letta-code@latest ...")
+        log("UPGRADE: running npm install @letta-ai/letta-code@$resolved ...")
         val p = try { pb.start() } catch (t: Throwable) {
             log("UPGRADE: npm failed to start: ${t.message}")
             setStatus("upgrade failed: ${t.message}")
@@ -686,6 +728,21 @@ class LettaEnvironmentService : Service() {
         }
         val npmExit = p.exitValue()
         log("UPGRADE: npm exit code $npmExit")
+        // Security (set 3): verify the INSTALLED version matches the pinned
+        // resolution — a registry that served different content under the
+        // same tag name diverges here.
+        val installedPkg = File(nodeModules, "@letta-ai/letta-code/package.json")
+        if (npmExit == 0 && installedPkg.exists()) {
+            val installedV = runCatching {
+                org.json.JSONObject(installedPkg.readText()).optString("version", "")
+            }.getOrDefault("")
+            if (installedV != resolved) {
+                log("UPGRADE: SECURITY — installed version $installedV != pinned $resolved; rolling back")
+                setStatus("upgrade failed: version mismatch")
+                updateNotification("Upgrade failed")
+                return
+            }
+        }
         if (npmExit != 0) {
             log("UPGRADE: npm FAILED — restarting with whatever is installed (npm usually leaves the previous version intact)")
             setStatus("npm failed (exit $npmExit) — restarting")
