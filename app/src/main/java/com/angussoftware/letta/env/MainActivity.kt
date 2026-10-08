@@ -1907,6 +1907,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
         // (crash-looped the phone app at every launch, Sep 26).
         // agentctl hcrequest path: launch the HC permission request once the
         // activity is resumed (contract needs a RESUMED activity).
+        // EXTRA_KEY_CONFIRM: set by the key-sync listener's launch intent.
+        // maybeShowKeyConfirm() (called above, unconditionally) no-ops when
+        // nothing is staged — a foreign app firing this extra surfaces an
+        // empty no-op. Explicit read kept for intent documentation only.
+        @Suppress("UNUSED_EXPRESSION") intent?.getBooleanExtra(WatchKeySyncListenerService.EXTRA_KEY_CONFIRM, false)
         if (intent?.getBooleanExtra("AUTO_HC_REQUEST", false) == true && !hcAutoRequested) {
             hcAutoRequested = true
             hcRequestLaunch()

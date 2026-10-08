@@ -22,7 +22,8 @@ class SinkValidationTest {
         assertNull(LettaEnvironmentService.validatedKey(""))
         assertNull(LettaEnvironmentService.validatedKey(null))
         // whitespace is trimmed then validated
-        assertEquals("ok", LettaEnvironmentService.validatedKey("  sk-let-" + "b".repeat(25) + "  ")?.let { "ok" })
+        // returns-TRIMMED contract (the Accept path commits the returned value)
+        assertEquals("sk-let-" + "b".repeat(25), LettaEnvironmentService.validatedKey("  sk-let-" + "b".repeat(25) + "  "))
     }
     @Test fun env_shape() {
         assertEquals("ok", LettaEnvironmentService.validatedEnv("phone")?.let { "ok" })
