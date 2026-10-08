@@ -81,7 +81,15 @@ class LettaEnvironmentService : Service() {
         val writeFirstBootRecord: Boolean,
         val recordVersion: String? = null,  // UPGRADED_UNPINNED only: record's version
         val recordSha: String? = null,      // UPGRADED_UNPINNED only: record's post-patch sha
+        // UPGRADED_UNPINNED only: the letta.js bytes read ONCE for the
+        // decision (review 2734). The boot path patches THESE bytes — never
+        // a disk re-read — so decision, patch, and Keystore record all hash
+        // one byte-lineage an orphaned same-uid process cannot split.
+        val content: String? = null,
     )
+
+    /** Patcher output (review 2734): patched content + applied site count. */
+    internal data class PatchResult(val content: String, val sites: Int)
 
     companion object {
         // Security sink validation (adversarial review Oct 8): these values
@@ -177,6 +185,13 @@ class LettaEnvironmentService : Service() {
             }
             return md.digest().joinToString("") { "%02x".format(it) }
         }
+
+        /** In-memory sha256 (review 2734): hash the byte-lineage a caller
+         *  holds, NOT a disk re-read that an orphaned same-uid process can
+         *  race between write and hash. */
+        internal fun sha256Of(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it) }
 
         /**
          * Keystore-backed upgrade-record pin decision (Oct 8 review 2733,
@@ -882,8 +897,8 @@ class LettaEnvironmentService : Service() {
         // from the patch + emulated link's own wx-write = EEXIST crash on
         // boot, Sep 26). Only the launcher/interpreter patches remain needed;
         // the link rewrites must NOT run when the shim is deployed.
-        val applied = applyLettaJsPatches(nodeModules, linksHandled = true)
-        if (applied == 0) {
+        val patched = applyLettaJsPatches(nodeModules, linksHandled = true)
+        if (patched.sites == 0) {
             // Fail-closed (Oct 8 set-3 follow-up): npm JUST wrote this file,
             // so 0 sites means the patcher no longer matches upstream (not
             // "already patched" — fresh install has no prior boot). The
@@ -906,9 +921,23 @@ class LettaEnvironmentService : Service() {
         // is the ONLY thing that lets a future verifyLettaJsPin treat a
         // non-pin version as "genuinely upgraded" — the agent-writable
         // package.json can't fake it.
-        runCatching {
-            writeUpgradeRecord(resolved, sha256Of(File(nodeModules, "@letta-ai/letta-code/letta.js")))
-        }.onFailure { log("UPGRADE-RECORD: post-upgrade write failed: ${it.message}") }
+        // Review 2734: the sha hashes the patcher's in-memory OUTPUT — the
+        // exact bytes writeText just landed, no disk re-read between write
+        // and record. A post-write attacker swap therefore diverges from the
+        // record and the NEXT boot reads UPGRADED_TAMPERED and blocks.
+        // Record-write failure fails LOUD (return false, same as 0-sites):
+        // booting an unrecorded upgrade would brick-and-rollback silently
+        // on the next boot instead of surfacing now.
+        val recordOk = runCatching {
+            writeUpgradeRecord(resolved, sha256Of(patched.content.toByteArray(Charsets.UTF_8)))
+        }.getOrDefault(false)
+        if (!recordOk) {
+            log("UPGRADE-RECORD: post-upgrade record write FAILED — not booting an unrecorded " +
+                "upgrade (the pin would restore-or-block it next boot anyway; failing loud now)")
+            setStatus("upgrade failed: record write")
+            updateNotification("Upgrade failed — record")
+            return false
+        }
 
         val after = currentVersion()
         log("UPGRADE: $before -> $after")
@@ -931,15 +960,37 @@ class LettaEnvironmentService : Service() {
      *  - BashSession persistent-shell spawn "/bin/bash" -> SHELL-aware —
      *    absolute /bin/bash does not exist on the host (1 site, 0.32.x only).
      */
-    private fun applyLettaJsPatches(nodeModules: File, linksHandled: Boolean = false): Int {
+    private fun applyLettaJsPatches(nodeModules: File, linksHandled: Boolean = false): PatchResult {
         val lettaJs = File(nodeModules, "@letta-ai/letta-code/letta.js")
         if (!lettaJs.exists()) {
             log("PATCH: letta.js not found")
-            return 0
+            return PatchResult("", 0)
         }
-        val s = lettaJs.readText()
+        val res = applyLettaJsPatches(lettaJs.readText(), linksHandled)
+        if (res.sites > 0) {
+            lettaJs.writeText(res.content)
+            log("PATCH: applied ${res.sites} letta.js patch site(s)")
+        } else {
+            log("PATCH: letta.js already fully patched (or 0 sites matched)")
+        }
+        return res
+    }
+
+    /**
+     * In-memory patcher core (review 2734, bytes-in-memory flow): takes
+     * PRE-READ letta.js content instead of touching the disk. Callers that
+     * already hold authority bytes (the boot path via verifyLettaJsPin's
+     * single read; the upgrade path via the patcher wrapper) patch those
+     * bytes and writeText the RESULT — decision, patch, and Keystore record
+     * all hash one byte-lineage, so no orphaned same-uid process can swap
+     * an implant between the patcher's write and a disk re-read.
+     * Returns the patched content plus the site count (0 = already patched
+     * OR upstream changed; callers that just wrote the file warn on 0,
+     * restart-path callers do not).
+     */
+    internal fun applyLettaJsPatches(content: String, linksHandled: Boolean): PatchResult {
         var patched = 0
-        var out = s
+        var out = content
 
         // --- Android link() rewrite -------------------------------------
         // DEPRECATED: fs-shim.js (NODE_OPTIONS preload) emulates link() at
@@ -1042,13 +1093,7 @@ class LettaEnvironmentService : Service() {
                 "cp.spawn(process.env.SHELL || \"/bin/bash\", [\"--noprofile\", \"--norc\"]")
             patched++
         }
-        if (patched > 0) {
-            lettaJs.writeText(out)
-            log("PATCH: applied $patched letta.js patch site(s)")
-        } else {
-            log("PATCH: letta.js already fully patched (or 0 sites matched)")
-        }
-        return patched
+        return PatchResult(out, patched)
     }
 
     private fun runEnvironment() {
@@ -1167,7 +1212,28 @@ class LettaEnvironmentService : Service() {
         // launcher/interpreter fixes are load-bearing for the Bash tool.
         // fs-shim handles link() at runtime; on fresh installs skip the
         // link-string patches entirely (they conflict — see upgrade path).
-        val startApplied = applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"), linksHandled = true)
+        // Review 2734 (bytes-in-memory): on UPGRADED_UNPINNED the patcher
+        // runs over the EXACT bytes the pin decision hashed (pinOutcome.
+        // content) and the writeText result is what gets recorded — no disk
+        // re-read anywhere on the path, so a post-write attacker swap
+        // diverges disk from record and the NEXT boot reads
+        // UPGRADED_TAMPERED and blocks. Pinned installs keep the file-based
+        // patcher (the manifest pin owns those bytes).
+        val unpinnedBytes = pinOutcome.content
+        var bootPatched: String? = null
+        val startApplied = if (unpinnedBytes != null) {
+            val res = applyLettaJsPatches(unpinnedBytes, linksHandled = true)
+            if (res.sites > 0) {
+                lettaJs(rootfsDir).writeText(res.content)
+                log("PATCH: applied ${res.sites} letta.js patch site(s) — in-memory lineage")
+                bootPatched = res.content
+            } else {
+                log("PATCH: letta.js already fully patched (or 0 sites matched)")
+            }
+            res.sites
+        } else {
+            applyLettaJsPatches(File(rootfsDir, "usr/local/lib/node_modules"), linksHandled = true).sites
+        }
         if (startApplied == 0) {
             // Fail-closed ONLY when the pin just verified authority bytes
             // (unpatched by construction) — 0 sites there means the patcher
@@ -1214,8 +1280,13 @@ class LettaEnvironmentService : Service() {
         // keeps the tamper check accurate without downgrading protection —
         // an attacker rewriting letta.js can NEVER reach this line (the
         // gate above restored-or-blocked before patching).
+        // Review 2734: the refreshed sha hashes the IN-MEMORY patched
+        // lineage — never a disk re-read (that re-read was the race).
         else if (pinOutcome.decision == PinState.UPGRADED_UNPINNED) {
-            val postPatch = runCatching { sha256Of(lettaJs(rootfsDir)) }.getOrDefault("")
+            val lineage = bootPatched ?: unpinnedBytes
+            val postPatch = if (lineage != null) {
+                runCatching { sha256Of(lineage.toByteArray(Charsets.UTF_8)) }.getOrDefault("")
+            } else ""
             if (postPatch.isNotEmpty() && postPatch != pinOutcome.recordSha) {
                 runCatching {
                     writeUpgradeRecord(pinOutcome.recordVersion ?: "", postPatch)
@@ -2112,12 +2183,21 @@ class LettaEnvironmentService : Service() {
         // installedV is EVIDENCE, never authority — only a Keystore-MACed
         // record written by the service can bless a version as genuinely
         // upgraded. See decidePinState for the full decision table.
+        //
+        // Bytes-in-memory (review 2734): letta.js is read ONCE, HERE. The
+        // decision hashes THESE bytes and they are sealed into the PinOutcome
+        // for the boot path to patch. Hashing the file for the decision and
+        // then letting the boot path re-read it let an orphaned hostile
+        // process swap an implant between the two reads — the app would mint
+        // the Keystore MAC over ATTACKER bytes and the one-shot race became
+        // permanent. One read, one lineage.
+        val readOnce = runCatching { lettaJs(rootfsDir).readText() }.getOrNull()
         val record = readUpgradeRecord()
         val state = decidePinState(
             recordValid = record?.first == true,
             recordVersion = record?.second ?: "",
             recordSha = record?.third ?: "",
-            currentSha = runCatching { sha256Of(lettaJs(rootfsDir)) }.getOrDefault(""),
+            currentSha = readOnce?.let { sha256Of(it.toByteArray(Charsets.UTF_8)) } ?: "",
             pinVersion = pinVersion,
         )
         when (state) {
@@ -2126,7 +2206,9 @@ class LettaEnvironmentService : Service() {
                 // the service itself installed this and letta.js is intact.
                 log("PATCH-PIN: upgrade record valid (version ${record!!.second}) — pin not applied " +
                     "(genuine npm upgrade, post-patch sha matched)")
-                return PinOutcome(true, state, pinVersion, false, record.second, record.third)
+                // readOnce is handed to the boot path alongside the decision
+                // — decision and bytes are sealed together (review 2734).
+                return PinOutcome(true, state, pinVersion, false, record.second, record.third, readOnce)
             }
             PinState.UPGRADED_TAMPERED -> {
                 // Record VALID + version != pin + sha MISMATCH: something
@@ -2182,11 +2264,14 @@ class LettaEnvironmentService : Service() {
     /**
      * Keystore-backed upgrade record (Oct 8 review 2733, option A).
      *
-     * Record = "version|sha256" where the sha is of letta.js AS IT EXISTS
-     * ON DISK at record time — callers write it only after applyLettaJsPatches
-     * succeeds (POST-patch bytes), so no upgraded boot ever false-alarms the
-     * tamper check. MAC = HmacSHA256(record) under a non-exportable
-     * AndroidKeyStore key. The agent shell shares this uid: it can read,
+     * Record = "version|sha256" where the sha is of the letta.js bytes the
+     * SERVICE holds in memory at record time — the patcher's output lineage,
+     * NOT a disk re-read (review 2734: a re-read let an orphaned same-uid
+     * process swap an implant between write and hash, and the app minted the
+     * MAC over ATTACKER bytes). Callers write it only after
+     * applyLettaJsPatches succeeds (POST-patch bytes), so no upgraded boot
+     * ever false-alarms the tamper check. MAC = HmacSHA256(record) under a
+     * non-exportable AndroidKeyStore key. The agent shell shares this uid: it can read,
      * modify, or delete the prefs entry, but it can NEVER forge the MAC —
      * a record claiming "0.35.0 is a genuine upgrade" is only believable
      * when the service itself wrote it.
@@ -2213,21 +2298,31 @@ class LettaEnvironmentService : Service() {
         null // fail-closed: unverifiable record -> pin applies
     }
 
-    private fun writeUpgradeRecord(version: String, lettaJsSha256: String) {
+    private fun writeUpgradeRecord(version: String, lettaJsSha256: String): Boolean {
+        // Writer-side guard (review 2734 non-blocker b): refuse degenerate
+        // rows — an empty version or sha would mint a MAC over exactly the
+        // shape decidePinState treats as "version authority alone unpins".
+        // Every legitimate caller has both values.
+        if (version.isEmpty() || lettaJsSha256.isEmpty()) {
+            log("UPGRADE-RECORD: refusing degenerate record (empty version or sha)")
+            return false
+        }
         try {
             val payload = "$version|$lettaJsSha256"
             val mac = keystoreMac(payload.toByteArray(Charsets.UTF_8))
             if (mac == null) {
                 log("UPGRADE-RECORD: keystore unavailable — record NOT written; pin stays armed")
-                return
+                return false
             }
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString(PREF_UPGRADE_RECORD, payload)
                 .putString(PREF_UPGRADE_RECORD_MAC, mac.joinToString("") { "%02x".format(it) })
                 .apply()
             log("UPGRADE-RECORD: recorded version $version (keystore-MACed, post-patch sha)")
+            return true
         } catch (e: Exception) {
             log("UPGRADE-RECORD: write failed: ${e.message}")
+            return false
         }
     }
 

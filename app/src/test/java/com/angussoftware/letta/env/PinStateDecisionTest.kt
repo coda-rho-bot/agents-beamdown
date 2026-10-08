@@ -135,6 +135,132 @@ class PinStateDecisionTest {
                 "successfully patched install gets recorded)",
             zeroBlock in 0 until recordAt,
         )
+        // Review 2734 (bytes-in-memory): the recorded sha must hash the
+        // patcher's in-memory OUTPUT, never a post-write disk re-read.
+        assertFalse(
+            "upgradeLetta record sha must NOT re-read the file post-write — sha256Of(File(...)) " +
+                "between writeText and record is exactly the review-2734 race (orphaned " +
+                "same-uid process swaps an implant; the app MACs ATTACKER bytes).",
+            Regex("""sha256Of\(File\(nodeModules, "@letta-ai/letta-code/letta\.js"\)\)""")
+                .containsMatchIn(upg),
+        )
+        assertTrue(
+            "upgradeLetta record sha must hash the patcher's in-memory output " +
+                "(patched.content.toByteArray) — decision, patch, and record over one lineage",
+            Regex("""sha256Of\(patched\.content\.toByteArray\(Charsets\.UTF_8\)\)""")
+                .containsMatchIn(upg),
+        )
+    }
+
+    // ---- review 2734 blocker: one read, one lineage (bytes-in-memory) ------
+
+    @Test
+    fun `verifyLettaJsPin reads letta js once and seals bytes into the unpinned outcome`() {
+        val t = src()
+        val verify = t.substringAfter("private fun verifyLettaJsPin(")
+        val reads = Regex("""lettaJs\(rootfsDir\)\.readText\(\)""").findAll(verify).count()
+        assertTrue(
+            "verifyLettaJsPin must read letta.js exactly ONCE (found $reads) — the decision " +
+                "hash and the boot-path bytes must come from one read. Separate reads are the " +
+                "review-2734 race: swap an implant between them and the app MACs attacker bytes.",
+            reads == 1,
+        )
+        assertFalse(
+            "the pin decision must hash the in-memory bytes (readOnce), never the file — " +
+                "sha256Of(lettaJs(rootfsDir)) as decision input is the split-read race",
+            Regex("""sha256Of\(lettaJs\(rootfsDir\)\)""").containsMatchIn(verify),
+        )
+        assertTrue(
+            "UPGRADED_UNPINNED outcome must seal the bytes (content = readOnce) so the boot " +
+                "path patches the exact lineage the decision hashed",
+            Regex("""PinOutcome\(true, state, pinVersion, false, record\.second, record\.third, readOnce\)""")
+                .containsMatchIn(verify),
+        )
+    }
+
+    @Test
+    fun `boot path patches the sealed bytes - no disk re-read between verify and record`() {
+        val t = src()
+        val runEnv = t.substringAfter("private fun runEnvironment(")
+        assertTrue(
+            "boot path must take the bytes from pinOutcome.content (the sealed lineage)",
+            "val unpinnedBytes = pinOutcome.content" in runEnv,
+        )
+        assertTrue(
+            "unpinned branch must patch the in-memory bytes and writeText the result",
+            Regex("""applyLettaJsPatches\(unpinnedBytes""").containsMatchIn(runEnv) &&
+                Regex("""lettaJs\(rootfsDir\)\.writeText\(res\.content\)""").containsMatchIn(runEnv),
+        )
+        // The record refresh on the unpinned path must hash the IN-MEMORY
+        // lineage. Extraction: from the refresh comment to the launch prep.
+        val refreshAt = runEnv.indexOf("Record refresh (app-update drift")
+        val libPathAt = runEnv.indexOf("val libPath = libDir.absolutePath")
+        assertTrue("refresh block anchors not found — extraction broken", refreshAt in 0 until libPathAt)
+        val refresh = runEnv.substring(refreshAt, libPathAt)
+        assertFalse(
+            "record-refresh sha must NOT hash the disk file — sha256Of(lettaJs(rootfsDir)) " +
+                "after the patch writeText is exactly the write-then-reread race",
+            Regex("""sha256Of\(lettaJs\(rootfsDir\)\)""").containsMatchIn(refresh),
+        )
+        assertTrue(
+            "record-refresh sha must hash the in-memory patched lineage " +
+                "(bootPatched ?: unpinnedBytes)",
+            "bootPatched ?: unpinnedBytes" in refresh,
+        )
+    }
+
+    @Test
+    fun `upgrade record write failure fails loud - upgradeLetta returns false`() {
+        // Review 2734 non-blocker (a): a swallowed record-write failure booted
+        // an unrecorded upgrade that the next boot silently rolled back.
+        val t = src()
+        val upg = t.substringAfter("private fun upgradeLetta(): Boolean")
+        val guardAt = upg.indexOf("if (!recordOk)")
+        assertTrue(
+            "record-write outcome must be checked (val recordOk + if (!recordOk)) — swallowing it " +
+                "boots an unrecorded upgrade",
+            guardAt >= 0,
+        )
+        val failReturn = upg.indexOf("return false", guardAt)
+        assertTrue(
+            "failed record write must return false (loud, same as 0-patch-sites) — do not boot",
+            failReturn in guardAt until guardAt + 400,
+        )
+    }
+
+    @Test
+    fun `writeUpgradeRecord is boolean and refuses degenerate rows`() {
+        // Review 2734 non-blocker (b): writer-side guard against empty
+        // version/sha — a MAC over "0.35.0|" is exactly the shape
+        // decidePinState treats as "version authority alone unpins".
+        val t = src()
+        assertTrue(
+            "writeUpgradeRecord must return Boolean (callers fail loud on false)",
+            "private fun writeUpgradeRecord(version: String, lettaJsSha256: String): Boolean" in t,
+        )
+        val w = t.substringAfter("private fun writeUpgradeRecord(")
+        assertTrue(
+            "writer must guard empty version/sha before minting a MAC",
+            "version.isEmpty() || lettaJsSha256.isEmpty()" in w,
+        )
+    }
+
+    @Test
+    fun `in-memory sha256Of matches file sha256Of for identical bytes`() {
+        // Equivalence of the two hash entry points: the lineage hash
+        // (ByteArray) and the file hash must agree byte-for-byte, or the
+        // record would never match a re-derived disk hash at next boot.
+        val bytes = ByteArray(200_000) { (it % 251).toByte() }  // > one 64K chunk
+        val tmp = kotlin.io.path.createTempFile("sha", ".bin").toFile()
+        try {
+            tmp.writeBytes(bytes)
+            assertEquals(
+                LettaEnvironmentService.sha256Of(tmp),
+                LettaEnvironmentService.sha256Of(bytes),
+            )
+        } finally {
+            tmp.delete()
+        }
     }
 
     @Test
