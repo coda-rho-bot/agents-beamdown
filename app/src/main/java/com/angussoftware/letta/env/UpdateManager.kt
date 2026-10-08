@@ -63,6 +63,7 @@ object UpdateManager {
     const val PREF_UPDATE_TAG = "update_tag"           // latest newer tag, e.g. "v0.4.0"
     const val PREF_UPDATE_URL = "update_url"           // APK asset browser_download_url
     const val PREF_UPDATE_SHA_URL = "update_sha_url"   // .sha256 sidecar URL (set 4)
+    const val PREF_DISCOVERED_SHA = "update_discovered_sha256" // sidecar hex resolved at discovery (set 4, review 2738 B1)
     const val PREF_UPDATE_MODE = "update_mode"         // MODE_PROMPT | MODE_AUTO_OVERNIGHT
     const val PREF_LAST_CHECK = "update_last_check_ms"
     const val PREF_DL_ID = "update_dl_id"              // DownloadManager enqueue id
@@ -105,7 +106,7 @@ object UpdateManager {
     private val receiverRegistered = AtomicBoolean(false)
 
     /** Release as published on the feed. apkUrl null = release carries no APK asset. */
-    data class ReleaseInfo(val tag: String, val apkUrl: String?, val notes: String, val sha256Url: String? = null, val apkSize: Long = -1)
+    data class ReleaseInfo(val tag: String, val apkUrl: String?, val notes: String, val sha256Url: String? = null)
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(LettaEnvironmentService.PREFS, Context.MODE_PRIVATE)
@@ -160,10 +161,44 @@ object UpdateManager {
                     }
                 }
             }
-            ReleaseInfo(tag, apkUrl, obj.optString("body"), shaUrl, bestSize)
+            // bestSize stays internal to picking the APK asset (PRs attach
+            // exactly one; largest-wins if that changes) — the unused field
+            // was dropped from ReleaseInfo (review 2738 N5).
+            ReleaseInfo(tag, apkUrl, obj.optString("body"), shaUrl)
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Parse the .sha256 sidecar content. release.yml writes sha256sum
+     * format — "<hex>  <filename>\n" — so the hex is the FIRST
+     * whitespace-separated token, not the whole line (a whole-line 64-hex
+     * match rejects every real sidecar and post-B2 that would refuse all
+     * installs; sha256sum -c consumes the same first-token convention).
+     * Null when no valid 64-hex token leads the file.
+     */
+    fun parseSidecarSha(content: String): String? {
+        val tok = content.trim().split(Regex("\\s+")).firstOrNull { it.isNotEmpty() } ?: return null
+        return if (tok.matches(Regex("^[0-9a-fA-F]{64}$"))) tok.lowercase() else null
+    }
+
+    /**
+     * Pure install gate (review 2738 B2): distinguish a genuinely legacy
+     * release (no sidecar asset ever published — warn + install) from a
+     * modern release whose sidecar could not be resolved at discovery
+     * (fetch failure, 404, malformed) — the latter REFUSES. An on-path
+     * attacker who can serve a swapped APK can trivially suppress the tiny
+     * sidecar instead of defeating the hash; treating suppression as
+     * "legacy" is fail-open against exactly the adversary this mechanism
+     * exists for.
+     */
+    enum class ShaGate { LEGACY, VERIFY, REFUSE }
+
+    fun shaGate(sidecarUrl: String?, discoveredSha: String?): ShaGate = when {
+        sidecarUrl.isNullOrEmpty() -> ShaGate.LEGACY
+        discoveredSha.isNullOrEmpty() -> ShaGate.REFUSE
+        else -> ShaGate.VERIFY
     }
 
     /**
@@ -266,6 +301,25 @@ object UpdateManager {
     // ---- feed check ----------------------------------------------------------
 
     /**
+     * Fetch the .sha256 sidecar (small text) and return the expected hex,
+     * or null when the sidecar is unreachable/malformed. Runs ONLY from
+     * background threads (discovery pass); the discovery path decides what
+     * a null means (shaGate), never enqueue.
+     */
+    private fun fetchSidecarHex(url: String): String? {
+        return runCatching {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15_000; conn.readTimeout = 15_000
+            try {
+                if (conn.responseCode != 200) return null
+                parseSidecarSha(conn.inputStream.bufferedReader().use { it.readText() })
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    /**
      * Async feed check, 5h-gated unless [force]. On success: store the newer
      * release, or clear stale availability when we're current. On failure
      * (offline / 404 private feed): keep previous state.
@@ -293,10 +347,20 @@ object UpdateManager {
                     if (rel != null && rel.apkUrl != null) {
                         if (isNewer(rel.tag, BuildConfig.VERSION_NAME)) {
                             val wasTag = prefs(app).getString(PREF_UPDATE_TAG, null)
+                            // Set 4 / review 2738 B1: resolve the expected
+                            // sha256 HERE — background thread, and it freezes
+                            // the expectation at discovery so a feed flip
+                            // between check and download can't touch it.
+                            // Empty string = sidecar URL absent (legacy) is
+                            // represented by an empty PREF_UPDATE_SHA_URL;
+                            // URL present but hex unresolvable persists ""
+                            // (shaGate REFUSE at install — fail closed).
+                            val shaHex = rel.sha256Url?.let { fetchSidecarHex(it) }.orEmpty()
                             prefs(app).edit()
                                 .putString(PREF_UPDATE_TAG, rel.tag)
                                 .putString(PREF_UPDATE_URL, rel.apkUrl)
                                 .putString(PREF_UPDATE_SHA_URL, rel.sha256Url ?: "")
+                                .putString(PREF_DISCOVERED_SHA, shaHex)
                                 .apply()
                             // First discovery of a new tag → notify promptly
                             // (don't wait for the next 30-min periodic tick)
@@ -505,6 +569,8 @@ object UpdateManager {
         p.edit()
             .remove(PREF_UPDATE_TAG)
             .remove(PREF_UPDATE_URL)
+            .remove(PREF_UPDATE_SHA_URL)
+            .remove(PREF_DISCOVERED_SHA)
             .remove(PREF_DL_ID)
             .remove(PREF_DL_DONE)
             .remove(PREF_DL_TAG)
@@ -555,32 +621,18 @@ object UpdateManager {
      * metered guard stays for every NON-interactive path: the overnight
      * auto-update and feed-triggered prefetches keep allowMetered=false.
      */
-    // Security (set 4): expected sha256 for the pending download, persisted
-    // at enqueue time from the feed's .sha256 sidecar (empty = sidecar absent
-    // → legacy releases install with a logged warning; new releases all carry it).
-    const val PREF_DL_SHA = "update_dl_sha256"
-
-    /** Fetch the .sha256 sidecar (small text) and persist the expected hex. */
-    private fun fetchExpectedSha(context: Context): String? {
-        val url = prefs(context).getString(PREF_UPDATE_SHA_URL, null)?.takeIf { it.isNotEmpty() } ?: return null
-        return runCatching {
-            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 15000; conn.readTimeout = 15000
-            if (conn.responseCode != 200) { conn.disconnect(); return null }
-            val hex = conn.inputStream.bufferedReader().use { it.readLine().orEmpty() }.trim()
-            conn.disconnect()
-            if (hex.matches(Regex("^[0-9a-fA-F]{64}"))) hex.lowercase() else null
-        }.getOrNull()
-    }
-
     fun enqueueDownload(context: Context, allowMetered: Boolean = false): Boolean {
         val app = context.applicationContext
         val p = prefs(app)
         val url = p.getString(PREF_UPDATE_URL, null) ?: return false
-        // set 4: resolve expected sha at enqueue (network op, small file)
-        val expectedSha = fetchExpectedSha(context)
-        p.edit().putString(PREF_DL_SHA, expectedSha ?: "").apply()
         val tag = p.getString(PREF_UPDATE_TAG, null) ?: return false
+        // Set 4 / review 2738 B1: ZERO network here. The expected hex was
+        // resolved on the background discovery pass (maybeCheckAsync →
+        // PREF_DISCOVERED_SHA); enqueue is called from the UI thread
+        // (MainActivity.onUpdateButtonTap) and a synchronous fetch there is
+        // NetworkOnMainThreadException — swallowed → empty pref → silent
+        // unverified installs. Enqueue also works offline now; the sha
+        // decision happens at install (shaGate).
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle("Agents Beamdown $tag")
             .setDescription("App update")
@@ -757,29 +809,56 @@ object UpdateManager {
         // is caught here (Android's signature check remains the last line
         // for cross-signer swaps; this catches same-signer content swaps a
         // compromised signing key or feed would enable).
-        val expectedSha = p.getString(PREF_DL_SHA, "").orEmpty()
-        if (expectedSha.isNotEmpty()) {
-            val actual = runCatching {
-                val md = java.security.MessageDigest.getInstance("SHA-256")
-                file.inputStream().use { ins ->
-                    val buf = ByteArray(1 shl 20)
-                    while (true) {
-                        val n = ins.read(buf)
-                        if (n < 0) break
-                        md.update(buf, 0, n)
-                    }
-                }
-                md.digest().joinToString("") { "%02x".format(it) }
-            }.getOrDefault("")
-            if (!actual.equals(expectedSha, ignoreCase = true)) {
-                android.util.Log.e("UpdateManager", "APK sha256 MISMATCH: expected $expectedSha got $actual — refusing install, dropping download")
+        val sidecarUrl = p.getString(PREF_UPDATE_SHA_URL, null)
+        val expectedSha = p.getString(PREF_DISCOVERED_SHA, null)
+        when (shaGate(sidecarUrl, expectedSha)) {
+            ShaGate.LEGACY ->
+                // No sidecar asset on the release at all (pre-set-4
+                // releases) — warn + install. Only reachable for genuinely
+                // legacy releases: modern releases all publish the sidecar,
+                // and a URL that WAS present but couldn't be resolved at
+                // discovery is REFUSE, not legacy (review 2738 B2).
+                android.util.Log.w("UpdateManager", "no sha256 sidecar for this release — installing without content verify (pre-sidecar release?)")
+            ShaGate.REFUSE -> {
+                // Sidecar listed but hex unresolvable at discovery (fetch
+                // failure, 404, malformed). An on-path attacker serving a
+                // swapped APK can suppress the tiny sidecar URL while
+                // letting the big one through — treating that as legacy
+                // would be fail-open against exactly this adversary.
+                // Self-heal (review follow-up): clear the discovery so the
+                // next 30-min tick re-discovers and re-resolves — a
+                // TRANSIENT fetch failure heals in minutes instead of
+                // refusing until the 5h gate. The 5h check gate must go
+                // too, or the tick would honor the old timestamp and
+                // never re-check.
+                android.util.Log.e("UpdateManager", "sha256 sidecar unresolvable for $sidecarUrl — refusing install; clearing discovery for re-check")
                 file.delete()
-                p.edit().remove(PREF_DL_ID).remove(PREF_DL_SHA).putBoolean(PREF_DL_DONE, false).apply()
+                p.edit().remove(PREF_UPDATE_TAG).remove(PREF_UPDATE_URL).remove(PREF_UPDATE_SHA_URL)
+                    .remove(PREF_DISCOVERED_SHA).remove(PREF_LAST_CHECK)
+                    .remove(PREF_DL_ID).putBoolean(PREF_DL_DONE, false).apply()
                 return false
             }
-            android.util.Log.i("UpdateManager", "APK sha256 verified ($actual)")
-        } else {
-            android.util.Log.w("UpdateManager", "no sha256 sidecar for this release — installing without content verify (pre-sidecar release?)")
+            ShaGate.VERIFY -> {
+                val actual = runCatching {
+                    val md = java.security.MessageDigest.getInstance("SHA-256")
+                    file.inputStream().use { ins ->
+                        val buf = ByteArray(1 shl 20)
+                        while (true) {
+                            val n = ins.read(buf)
+                            if (n < 0) break
+                            md.update(buf, 0, n)
+                        }
+                    }
+                    md.digest().joinToString("") { "%02x".format(it) }
+                }.getOrDefault("")
+                if (!actual.equals(expectedSha, ignoreCase = true)) {
+                    android.util.Log.e("UpdateManager", "APK sha256 MISMATCH: expected $expectedSha got $actual — refusing install, dropping download")
+                    file.delete()
+                    p.edit().remove(PREF_DL_ID).putBoolean(PREF_DL_DONE, false).apply()
+                    return false
+                }
+                android.util.Log.i("UpdateManager", "APK sha256 verified ($actual)")
+            }
         }
         if (!app.packageManager.canRequestPackageInstalls()) {
             runCatching {
