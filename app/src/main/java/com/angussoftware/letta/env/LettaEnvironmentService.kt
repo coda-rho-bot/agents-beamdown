@@ -723,10 +723,12 @@ class LettaEnvironmentService : Service() {
                 - Your shell runs as an unprivileged app uid (no root). You can
                   read/write this app's storage and /sdcard (shared storage).
                   Other apps' private data is invisible; /system is read-only.
-                - Screen reading, tapping, typing, launching, and notification
-                  content are CONSENT-GATED: they require the device owner to
-                  approve a full-screen overlay (agentctl session "description").
-                  Timeout or decline = denied, fail-closed.
+                - ALL UI-level device control is CONSENT-GATED: reading the
+                  screen, tapping, typing, launching, navigation (back/home/
+                  notifications), and the am/pm/keyevent passthroughs. They
+                  require the device owner to approve a full-screen overlay
+                  (agentctl session "description"). Timeout or decline =
+                  denied, fail-closed.
                 - Health/location telemetry run under their Android permission
                   grants — the grant IS the consent.
 

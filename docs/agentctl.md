@@ -28,16 +28,26 @@ that generates all documentation — they cannot disagree.
 
 1. **UNGATED** — introspection (`ping`, `commands`, `access`,
    `capabilities`, `status`), consent flow itself (`session`),
-   navigation (`back`, `home`, `notifications`), grant-state-only reads
-   (`notifstatus`), the app's own diagnostic log (`logtail`).
+   grant-state-only reads (`notifstatus`), the app's own diagnostic log
+   (`logtail`).
 2. **GRANT_IS_CONSENT** — scoped telemetry where the Android permission
    grant is the consent: `health` (Health Connect), `location`.
-3. **SESSION_GATED** — privacy-bearing UI access: `screen`, `tree`,
+3. **SESSION_GATED** — all UI-level device control: `screen`, `tree`,
    `click`, `clickId`, `text`, `tap`, `longPress`, `swipe`, `key`,
-   `launch`, `notiflist`, `hcrequest`. Requires an approved session.
+   `launch`, `notiflist`, `hcrequest`, navigation (`back`, `home`,
+   `notifications` — audit R7-6: back can dismiss security dialogs), and
+   the shell passthroughs `am`, `pm`, `keyevent` (audit R7-2: same
+   capabilities as their gated named twins). Requires an approved session.
 4. **CLIENT_LOCAL** — implemented in the client script itself (agent
-   shell): `am`, `pm`, `keyevent`, `notify`. Never crosses the gated
-   socket; no per-action consent.
+   shell): `notify`. Never crosses the gated socket.
+
+   The session-gated passthroughs (`am`, `pm`, `keyevent`) are gated
+   client-side: agentctl queries the live service session state before
+   running them and refuses without an approved session (fail-closed).
+
+While a consent prompt is on screen, all session-gated actions are paused
+(the service refuses them) — an active session cannot keep acting while
+the user is deciding, and cannot approve its own renewal prompt.
 
 Sessions: `agentctl session "description" [seconds]` raises a
 full-screen overlay on the device. Default TTL 300s, max 3600s. Prompt

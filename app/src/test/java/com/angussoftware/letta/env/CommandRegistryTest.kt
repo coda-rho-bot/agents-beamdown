@@ -60,15 +60,20 @@ class CommandRegistryTest {
 
     @Test
     fun `consent classes are coherent`() {
-        // The privacy-bearing set stays gated no matter how the table is edited.
+        // The privacy-bearing and device-control set stays gated no matter
+        // how the table is edited. back/home/notifications and am/pm/keyevent
+        // joined this set Oct 8 (audit R7-6/R7-2): navigation can dismiss
+        // security dialogs; the passthroughs expose the same capabilities as
+        // their gated named twins.
         val gated = registry.filter { it.consent == AgentAccessibilityService.ConsentClass.SESSION_GATED }.map { it.name }.toSet()
         listOf("screenshot-text", "click", "clickId", "text", "tap", "longPress", "swipe",
-               "key", "launch", "notiflist", "hcrequest").forEach {
+               "key", "launch", "notiflist", "hcrequest",
+               "back", "home", "notifications", "am", "pm", "keyevent").forEach {
             assertTrue("$it must remain SESSION_GATED", it in gated)
         }
         // Introspection and app-own diagnostics stay ungated.
         listOf("ping", "commands", "capabilities", "status", "session",
-               "back", "home", "notifications", "notifstatus", "logtail").forEach {
+               "notifstatus", "logtail").forEach {
             assertTrue("$it must remain UNGATED (found ${registry.firstOrNull { r -> r.name == it }?.consent})",
                 registry.firstOrNull { r -> r.name == it }?.consent == AgentAccessibilityService.ConsentClass.UNGATED)
         }

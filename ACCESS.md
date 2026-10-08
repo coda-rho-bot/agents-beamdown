@@ -43,10 +43,16 @@ the same table.
 
 | Class | Meaning | Commands |
 |---|---|---|
-| `ungated` | introspection, navigation, app-own diagnostics | ping, commands, access, capabilities, status, session, back, home, notifications, notifstatus, logtail |
+| `ungated` | introspection, app-own diagnostics | ping, commands, access, capabilities, status, session, notifstatus, logtail |
 | `grant-is-consent` | scoped telemetry — the Android permission grant IS the consent | health, location |
-| `session-gated` | privacy-bearing — requires approved overlay session | screen, tree, click, clickId, text, tap, longPress, swipe, key, launch, notiflist, hcrequest |
-| `client-local` | runs in the agent shell, never crosses the gated socket | am, pm, keyevent, notify |
+| `session-gated` | all UI-level device control — requires approved overlay session (audit R7-6/R7-2) | screen, tree, click, clickId, text, tap, longPress, swipe, key, launch, notiflist, hcrequest, back, home, notifications, am, pm, keyevent |
+| `client-local` | runs in the agent shell, never crosses the gated socket | notify |
+
+`am`/`pm`/`keyevent` are session-gated **client-side**: agentctl checks the
+live service session state before running them (fail-closed — no service
+response means refusal). Their named twins `launch`/`key` are gated
+server-side; the passthroughs expose the same capabilities, so they carry
+the same class (Oct 8 audit R7-2).
 
 Adding a command: add it to `REGISTRY` with a consent class (CI fails
 without one — see `CommandRegistryTest`). Client/server drift is also a

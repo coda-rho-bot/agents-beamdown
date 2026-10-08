@@ -58,9 +58,13 @@ class AgentAccessibilityService : AccessibilityService() {
             private set
 
         /** Every socket command the service implements. order = display order.
-         *  CLIENT_LOCAL entries never traverse the socket — they run in the
-         *  agent shell (agentctl.sh passthroughs); listed so the index is the
-         *  complete honest surface. The consent gate ignores them. */
+         *  am/pm/keyevent never traverse the socket — they run in the agent
+         *  shell (agentctl.sh passthroughs) but are SESSION_GATED: the
+         *  agentctl client checks the live session state before running them
+         *  (audit R7-2 — their named twins launch/key are gated; the
+         *  passthroughs must not claim a weaker class than the capability
+         *  they expose). They stay listed so the index is the complete
+         *  honest surface. */
         val REGISTRY: List<CommandSpec> = listOf(
             CommandSpec("ping", args = "", does = "service handshake; returns uid", consent = ConsentClass.UNGATED),
             CommandSpec("commands", args = "", does = "this index (generated from the command registry — the same source the consent gate enforces)", consent = ConsentClass.UNGATED),
@@ -75,9 +79,9 @@ class AgentAccessibilityService : AccessibilityService() {
             CommandSpec("clickId", args = "view-id", does = "node-click by resource id", consent = ConsentClass.SESSION_GATED),
             CommandSpec("text", args = "\"value\"", does = "type into the focused input field", consent = ConsentClass.SESSION_GATED),
             CommandSpec("key", args = "keyCode", does = "press a key", note = "limited to back/home/recents; arbitrary keys need INJECT_EVENTS (usually denied)", consent = ConsentClass.SESSION_GATED),
-            CommandSpec("back", args = "", does = "global action: back", consent = ConsentClass.UNGATED),
-            CommandSpec("home", args = "", does = "global action: home", consent = ConsentClass.UNGATED),
-            CommandSpec("notifications", args = "", does = "global action: pull notification shade", consent = ConsentClass.UNGATED),
+            CommandSpec("back", args = "", does = "global action: back", note = "session-gated (audit R7-6): back can dismiss security/2FA dialogs", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("home", args = "", does = "global action: home", note = "session-gated (audit R7-6): navigation is device control", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("notifications", args = "", does = "global action: pull notification shade", note = "session-gated (audit R7-6): exposes notification content on screen", consent = ConsentClass.SESSION_GATED),
             CommandSpec("screenshot-text", clientAlias = "screen", args = "", does = "visible text elements + bounds + clickability (JSON)", consent = ConsentClass.SESSION_GATED),
             CommandSpec("tree", args = "[maxDepth]", does = "active window hierarchy (JSON)", consent = ConsentClass.SESSION_GATED),
             CommandSpec("launch", args = "uri", does = "open ACTION_VIEW intent", note = "works where shell am start is OEM-blocked", consent = ConsentClass.SESSION_GATED),
@@ -88,9 +92,9 @@ class AgentAccessibilityService : AccessibilityService() {
             CommandSpec("notiflist", args = "", does = "active notifications (pkg/title/text)", note = "message content is privacy-peer to screen", consent = ConsentClass.SESSION_GATED),
             CommandSpec("logtail", args = "[bytes]", does = "last N bytes (default 4096, max 16384) of the app's own server.log", note = "NOT session-gated — the app's own lifecycle lines, no user content", consent = ConsentClass.UNGATED),
             // client-local passthroughs (agent shell, not the gated socket):
-            CommandSpec("am", args = "<args>", does = "shell am passthrough (client-local)", note = "runs in the agent shell — no consent gate; OEM may block targets", consent = ConsentClass.CLIENT_LOCAL),
-            CommandSpec("pm", args = "<args>", does = "shell pm passthrough (client-local)", note = "runs in the agent shell — no consent gate", consent = ConsentClass.CLIENT_LOCAL),
-            CommandSpec("keyevent", args = "keyCode", does = "shell input keyevent (client-local)", note = "raw key injection; often denied by OEM — prefer back/home", consent = ConsentClass.CLIENT_LOCAL),
+            CommandSpec("am", args = "<args>", does = "shell am passthrough (client-local)", note = "session-gated client-side (audit R7-2: same capability as launch); agentctl checks session state before running; OEM may block targets", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("pm", args = "<args>", does = "shell pm passthrough (client-local)", note = "session-gated client-side (audit R7-2); agentctl checks session state before running", consent = ConsentClass.SESSION_GATED),
+            CommandSpec("keyevent", args = "keyCode", does = "shell input keyevent (client-local)", note = "session-gated client-side (audit R7-2: same capability as key); raw key injection, often denied by OEM — prefer back/home", consent = ConsentClass.SESSION_GATED),
             CommandSpec("notify", args = "\"title\" \"text\"", does = "post the app's own notification (client-local broadcast)", note = "always allowed — the app's own channel", consent = ConsentClass.CLIENT_LOCAL),
         )
     }
@@ -345,7 +349,9 @@ class AgentAccessibilityService : AccessibilityService() {
         }
         val dur = android.widget.TextView(this).apply {
             text = "Duration: ${seconds}s — then access revokes automatically. " +
-                "Approving lets the agent see and use this phone for that purpose."
+                "Approving grants FULL device control for that time: tap, type, " +
+                "launch apps, read the screen. The description above is the " +
+                "agent's stated intent — approval is NOT limited to it."
             textSize = if (small) 11f else 14f
             setTextColor(p.textSecondary)
             setPadding(0, 0, 0, dp(14))
@@ -416,6 +422,12 @@ class AgentAccessibilityService : AccessibilityService() {
         val spec = REGISTRY.firstOrNull { it.name == cmd || it.clientAlias == cmd }
         if (spec == null) return err().put("error", "unknown cmd: $cmd")
         if (spec.consent == ConsentClass.SESSION_GATED) gate()?.let { return it }
+        // While a consent prompt is on screen, session-gated actions are
+        // refused entirely: an agent holding an ACTIVE session must not be
+        // able to keep acting (or tap its own renewal overlay's Approve on
+        // OEMs where injected gestures work) while the user is deciding.
+        if (spec.consent == ConsentClass.SESSION_GATED && consentPromptShowing)
+            return err().put("error", "a consent prompt is showing — session actions are paused until the user decides")
 
         return when (cmd) {
             "ping" -> ok().put("service", "a11y").put("uid", android.os.Process.myUid())
@@ -472,6 +484,12 @@ class AgentAccessibilityService : AccessibilityService() {
         "tree" -> activeTree(req.optInt("maxDepth", 18))
         "click" -> nodeClick(req.getString("text"))
         "clickId" -> nodeClickId(req.getString("id"))
+        // am/pm/keyevent are gated client-side (agentctl checks session
+        // state before exec). If one arrives over the socket anyway, say so
+        // honestly instead of "unknown cmd" — the capability exists, this
+        // door just doesn't serve it.
+        "am", "pm", "keyevent" -> err()
+            .put("error", "$cmd is a client-side passthrough — run it via the agentctl client (which applies the session gate), not the socket")
         "launch" -> {
             // Handled client-side by agentctl (am start) in most cases; kept for URI intents
             val uri = req.optString("uri")
@@ -694,10 +712,10 @@ class AgentAccessibilityService : AccessibilityService() {
             .put("promptTimeoutSeconds", 120)
             .put("timeoutBehavior", "deny (fail-closed)")
             .put("classes", JSONObject()
-                .put("ungated", "introspection, navigation, app-own diagnostics — no consent needed")
+                .put("ungated", "introspection, app-own diagnostics — no consent needed")
                 .put("grant-is-consent", "scoped telemetry (health/location) — the Android permission grant IS the consent")
-                .put("session-gated", "privacy-bearing UI access — requires an approved consent overlay session")
-                .put("client-local", "runs in the agent shell (never crosses the gated socket); no per-action consent")))
+                .put("session-gated", "all UI-level device control — reading, tapping, typing, launching, navigation (back/home/notifications), am/pm/keyevent passthroughs — requires an approved consent overlay session")
+                .put("client-local", "runs in the agent shell (never crosses the gated socket); session-gated client-local commands are checked by the agentctl client before running")))
 
         // ---- the full command surface, straight from the registry ----
         m.put("commands", commandsIndex().optJSONArray("commands") ?: JSONArray())

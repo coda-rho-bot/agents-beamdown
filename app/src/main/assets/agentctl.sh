@@ -9,7 +9,8 @@
 #   agentctl access — filesystem probes, consent classes, session rules).
 # Consent classes: UNGATED (no consent), GRANT-IS-CONSENT (health/location
 # permission grant IS consent), SESSION-GATED (needs approved overlay),
-# CLIENT-LOCAL (runs here in the shell — am/pm/keyevent/notify).
+# CLIENT-LOCAL (runs here in the shell — notify only; am/pm/keyevent are
+# session-gated client-side, audit R7-2).
 #   agentctl ping
 #   agentctl tap <x> <y>            (BLOCKED on One UI 7 — gesture filter; use click)
 #   agentctl longpress <x> <y>      (BLOCKED on One UI 7 — use click + a11y)
@@ -17,12 +18,12 @@
 #   agentctl click "label"          (node-click by text/desc — Samsung-proof input)
 #   agentctl clickId view-id        (node-click by resource id)
 #   agentctl text "hello world"     (types into the focused field)
-#   agentctl back | home | notifications
-#   agentctl keyevent <keycode>     (needs INJECT_EVENTS — often denied; prefer back/home)
+#   agentctl back | home | notifications   (SESSION-GATED — audit R7-6)
+#   agentctl keyevent <keycode>     (SESSION-GATED client-side; needs INJECT_EVENTS — often denied; prefer back/home)
 #   agentctl screen                 (visible text + bounds JSON)
 #   agentctl tree [maxdepth]        (active window hierarchy JSON)
 #   agentctl launch <intent-uri>    (ACTION_VIEW — WORKS where shell am start is blocked)
-#   agentctl am <args...>           (passthrough to am; Samsung blocks some targets)
+#   agentctl am <args...>           (SESSION-GATED client-side passthrough; Samsung blocks some targets)
 #   agentctl notify "title" "text"  (app's own notification — always allowed)
 #   agentctl health status|hr|steps [hours]|sleep [days]
 #                                    (health telemetry; Health Connect grant IS consent —
@@ -35,7 +36,8 @@
 # CONSENT-GATED: screen/tree/click/text/launch need an approved session first:
 #   agentctl session "what you want to do" [seconds]   -> full-screen Approve/Deny overlay
 # Requires: Settings > Accessibility > Agents Beamdown Agent = ON (a11y cmds).
-# am/notify/keyevent work WITHOUT accessibility.
+# notify works WITHOUT a session; am/pm/keyevent require an approved session
+# (checked client-side against the live service status before exec).
 
 set -u
 AGENT_NAME="${AGENT_NAME:-Letta agent}"
@@ -54,6 +56,20 @@ send() {  # send() <<< one line of JSON (unix socket, app-uid only)
         echo "agentctl: transport failed (nc rc=$rc) — server may be restarting; retry shortly" >&2
     fi
     return $rc
+}
+
+# Session gate for client-side passthroughs (audit R7-2): am/pm/keyevent
+# expose the same device-control capabilities as their gated named twins
+# (launch/key), so the client refuses to run them without an approved
+# session — mirroring the service-side gate socket commands get. Fail-closed:
+# no service response = no session = refusal.
+require_session() {
+    ST=$(send '{"cmd":"status"}')
+    if [ -z "$ST" ] || ! printf '%s' "$ST" | grep -q '"sessionActive" *: *true'; then
+        echo '{"ok":false,"consentRequired":true,"error":"consent required — no approved session for client-local passthrough. Request one: agentctl session \"<description>\" [seconds]"}'
+        return 1
+    fi
+    return 0
 }
 
 case "${1:-help}" in
@@ -94,9 +110,9 @@ case "${1:-help}" in
         DESC=$(printf '%s' "$2" | sed 's/"/\\"/g')
         send "{\"cmd\":\"session\",\"desc\":\"$DESC\",\"agent\":\"$AGENT_NAME\",\"seconds\":$SECS}"
         ;;
-    keyevent)  /system/bin/input keyevent "$2" ;;
-    am)        shift; /system/bin/am "$@" ;;
-    pm)        shift; /system/bin/pm "$@" ;;
+    keyevent)  require_session || exit 1; /system/bin/input keyevent "$2" ;;
+    am)        require_session || exit 1; shift; /system/bin/am "$@" ;;
+    pm)        require_session || exit 1; shift; /system/bin/pm "$@" ;;
     notify)
         # App's own notification via its status channel — no special permission.
         # Implementation: the LettaEnvironmentService listens for this broadcast.
