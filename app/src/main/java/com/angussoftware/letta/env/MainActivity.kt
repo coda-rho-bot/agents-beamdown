@@ -1894,6 +1894,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
             if (isWatch()) showMainWatch() else showMain()
         }
         handler.post(refresh)
+        // Key-sync confirmation (security set 1, Angus review 2726): a key
+        // arriving via the wearable channel is STAGED by the listener, never
+        // saved. Show the accept dialog here — onResume covers both the
+        // fresh launch-intent path and the re-front path (the listener
+        // launches us with EXTRA_KEY_CONFIRM; a re-front of an already-open
+        // activity hits onResume without a new intent).
+        maybeShowKeyConfirm()
         // Autostart (once per process): MUST run from a resumed/foreground
         // activity — starting the FGS from onCreate (pre-resume) makes the
         // service's startForeground throw SecurityException on One UI
@@ -1909,6 +1916,60 @@ class MainActivity : androidx.activity.ComponentActivity() {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             if (!prefs.getString(PREF_KEY, "").isNullOrBlank()) ensureEnvironment()
         }
+    }
+
+    /**
+     * Security (set 1 / review 2726): the wearable key-sync can be forged by
+     * any app (uid-gating impossible in WearableListenerService). Defense =
+     * user confirmation: staged key + last-4 display + explicit Accept.
+     * Decline (or TTL expiry, or leaving the dialog) discards the candidate.
+     */
+    private fun maybeShowKeyConfirm() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val pending = prefs.getString(WatchKeySyncListenerService.PENDING_KEY, null) ?: return
+        val pendingEnv = prefs.getString(WatchKeySyncListenerService.PENDING_ENV, null) ?: LettaEnvironmentService.DEFAULT_ENV
+        val stagedAt = prefs.getLong(WatchKeySyncListenerService.PENDING_AT, 0L)
+        // Clear the staging FIRST — the dialog below is single-shot; a
+        // rotation/re-resume must not re-prompt from stale staging.
+        prefs.edit()
+            .remove(WatchKeySyncListenerService.PENDING_KEY)
+            .remove(WatchKeySyncListenerService.PENDING_ENV)
+            .remove(WatchKeySyncListenerService.PENDING_AT)
+            .apply()
+        if (System.currentTimeMillis() - stagedAt > WatchKeySyncListenerService.PENDING_TTL_MS) {
+            android.util.Log.i("WatchKeySync", "staged key expired — discarded")
+            return
+        }
+        val last4 = pending.takeLast(4)
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("API key received from phone")
+            .setMessage(
+                "A Letta API key ending \"…${last4}\" for environment \"$pendingEnv\" arrived over the wearable channel.\n\n" +
+                "Accept only if you just tapped Send key to watch on your phone."
+            )
+            .setPositiveButton("Accept") { _, _ ->
+                // Save through the same validation the onboarding path uses.
+                val keyOk = LettaEnvironmentService.validatedKey(pending)
+                val envOk = LettaEnvironmentService.validatedEnv(pendingEnv)
+                if (keyOk != null && envOk != null) {
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putString(PREF_KEY, keyOk)
+                        .putString(PREF_ENV, envOk)
+                        .apply()
+                    android.util.Log.i("WatchKeySync", "staged key accepted by user (env=$envOk)")
+                    if (onboardingShowing) {
+                        onboardingShowing = false
+                        if (isWatch()) showMainWatch() else showMain()
+                    }
+                    handler.post(refresh)
+                } else {
+                    android.util.Log.w("WatchKeySync", "staged key failed validation at commit — discarded")
+                }
+            }
+            .setNegativeButton("Decline", null)
+            .setOnCancelListener { android.util.Log.i("WatchKeySync", "key confirm dismissed — candidate discarded") }
+            .create()
+        dialog.show()
     }
 
     override fun onDestroy() {
