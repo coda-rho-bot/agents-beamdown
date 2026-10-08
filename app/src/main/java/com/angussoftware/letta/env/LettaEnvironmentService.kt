@@ -9,8 +9,11 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.nio.file.Files
 import java.util.zip.GZIPInputStream
@@ -18,6 +21,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import javax.crypto.KeyGenerator
+import javax.crypto.Mac
+import javax.crypto.SecretKey
 
 /**
  * Runs the letta server as a cloud execution environment on Android.
@@ -56,6 +62,26 @@ class LettaEnvironmentService : Service() {
     // parameter — nested-in-companion classifiers are not reachable from
     // the test source set via the class name.
     internal enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
+
+    // Keystore-backed pin decision states (Oct 8 review 2733, option A).
+    // Class body, NOT companion: nested-in-companion classifiers are not
+    // reachable from the JVM test source set via the class name (see the
+    // PendingOp note above).
+    internal sealed class PinState {
+        object PIN_APPLIES : PinState()
+        object UPGRADED_UNPINNED : PinState()
+        object UPGRADED_TAMPERED : PinState()
+    }
+
+    /** Result of verifyLettaJsPin for the boot path (gate + first-boot record). */
+    private data class PinOutcome(
+        val allowBoot: Boolean,
+        val decision: PinState?,      // null = pin inactive (no entry/header)
+        val pinVersion: String?,      // null = pin inactive
+        val writeFirstBootRecord: Boolean,
+        val recordVersion: String? = null,  // UPGRADED_UNPINNED only: record's version
+        val recordSha: String? = null,      // UPGRADED_UNPINNED only: record's post-patch sha
+    )
 
     companion object {
         // Security sink validation (adversarial review Oct 8): these values
@@ -151,6 +177,61 @@ class LettaEnvironmentService : Service() {
             }
             return md.digest().joinToString("") { "%02x".format(it) }
         }
+
+        /**
+         * Keystore-backed upgrade-record pin decision (Oct 8 review 2733,
+         * option A). Pure — unit-tested directly (PinStateDecisionTest).
+         *
+         * Threat (review blocker): the old logic trusted the installed
+         * package.json "version" to distinguish pinned vs upgraded installs.
+         * That file is agent-writable — a hostile turn seds
+         * 0.34.4 -> 0.35.0, drops an implant letta.js, and the pin read
+         * "upgraded, not applied", patched the implant, and booted it.
+         *
+         * Authority transfer: only the service, at upgrade time, may bless a
+         * version as "genuinely upgraded" — by writing a Keystore-MACed
+         * record {version, sha256 of POST-PATCH letta.js}. The MAC key lives
+         * in the Android Keystore (non-exportable): the agent shell shares
+         * this uid but can neither read the key nor forge the MAC, so it
+         * cannot mint a record for its own implant. Record storage is
+         * regular prefs (attacker can DELETE it — see below — or corrupt
+         * it, but not forge it).
+         *
+         * Decision table (fail-closed everywhere):
+         *   record ABSENT                    -> PIN_APPLIES (fresh install,
+         *                                       or attacker deleted the
+         *                                       record of a genuine upgrade
+         *                                       to downgrade-boot an
+         *                                       implant; the pin restores
+         *                                       authority bytes — deletion
+         *                                       only re-arms protection)
+         *   record MAC-INVALID               -> PIN_APPLIES + distinctive
+         *                                       log (attacker-crafted
+         *                                       record; same protection as
+         *                                       absent)
+         *   record VALID, version == pin     -> PIN_APPLIES (normal pinned
+         *                                       install; record written at
+         *                                       first successful boot)
+         *   record VALID, version != pin     -> genuine upgrade path:
+         *                                       current letta.js sha ==
+         *                                       record sha -> UPGRADED_UNPINNED
+         *                                       (tamper check is free here)
+         *                                       else UPGRADED_TAMPERED
+         *                                       (post-upgrade tamper —
+         *                                       block + security log)
+         */
+        internal fun decidePinState(
+            recordValid: Boolean,
+            recordVersion: String,
+            recordSha: String,
+            currentSha: String,
+            pinVersion: String,
+        ): PinState = when {
+            !recordValid -> PinState.PIN_APPLIES
+            recordVersion == pinVersion -> PinState.PIN_APPLIES
+            recordSha.isNotEmpty() && recordSha != currentSha -> PinState.UPGRADED_TAMPERED
+            else -> PinState.UPGRADED_UNPINNED
+        }
         // Dedicated channel for the persistent environment-running notification so users
         // can control it independently from any future alert channels.
         private const val CHANNEL_ID = "letta-env-status"
@@ -177,6 +258,12 @@ class LettaEnvironmentService : Service() {
         private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
+        // Keystore-backed letta-upgrade record (Oct 8 review 2733, option A).
+        // Key alias is FIXED: rotation-free by design (losing the key only
+        // re-arms the pin — fail-closed, never fail-open).
+        private const val UPGRADE_RECORD_KEY_ALIAS = "lettaUpgradeRecordV1"
+        private const val PREF_UPGRADE_RECORD = "upgrade_record_v1"
+        private const val PREF_UPGRADE_RECORD_MAC = "upgrade_record_v1_mac"
         const val ACTION_UPGRADE = "com.angussoftware.letta.env.action.UPGRADE"
         const val ACTION_RESTART = "com.angussoftware.letta.env.action.RESTART"
         const val ACTION_START_EXPLICIT = "com.angussoftware.letta.env.action.START_EXPLICIT"
@@ -705,9 +792,26 @@ class LettaEnvironmentService : Service() {
         }
         val resolved = try {
             val rp = resolvePb.start()
-            val out = rp.inputStream.bufferedReader().readText().trim()
-            rp.waitFor(60, TimeUnit.SECONDS)
-            out.lineSequence().lastOrNull { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
+            // Stream-then-wait (review 2733 non-blocker): readText BEFORE
+            // waitFor made the 60s timeout decorative — a hung `npm view`
+            // with a full pipe blocked the reader thread forever and the
+            // worker never reached waitFor. Same shape as the install path:
+            // reader thread + bounded waitFor + destroyForcibly on timeout.
+            val outBuf = StringBuilder()
+            val reader = Thread {
+                try {
+                    rp.inputStream.bufferedReader().forEachLine { outBuf.appendLine(it) }
+                } catch (_: Exception) {}
+            }.also { it.isDaemon = true; it.start() }
+            val fin = rp.waitFor(60, TimeUnit.SECONDS)
+            if (!fin) {
+                rp.destroyForcibly()
+                log("UPGRADE: npm view (resolve) timed out after 60s — aborting upgrade")
+                setStatus("upgrade failed: version resolve timeout")
+                updateNotification("Upgrade failed")
+                return true // previous install intact; boot it
+            }
+            outBuf.toString().lineSequence().lastOrNull { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
         } catch (t: Throwable) { null }
         if (resolved == null) {
             log("UPGRADE: failed to resolve latest version — aborting upgrade")
@@ -794,6 +898,17 @@ class LettaEnvironmentService : Service() {
             updateNotification("Upgrade failed — patch")
             return false // fresh-but-unpatchable letta.js must not boot
         }
+
+        // Keystore-backed upgrade record (review 2733 option A): written
+        // AFTER patching succeeds, over the POST-PATCH bytes that will
+        // actually exist at boot (Angus ordering: a pre-patch record would
+        // false-alarm the tamper check on every upgraded boot). This record
+        // is the ONLY thing that lets a future verifyLettaJsPin treat a
+        // non-pin version as "genuinely upgraded" — the agent-writable
+        // package.json can't fake it.
+        runCatching {
+            writeUpgradeRecord(resolved, sha256Of(File(nodeModules, "@letta-ai/letta-code/letta.js")))
+        }.onFailure { log("UPGRADE-RECORD: post-upgrade write failed: ${it.message}") }
 
         val after = currentVersion()
         log("UPGRADE: $before -> $after")
@@ -1039,7 +1154,8 @@ class LettaEnvironmentService : Service() {
         val manifestTextForPin = runCatching {
             assets.open("integrity-manifest.txt").bufferedReader().use { it.readText() }
         }.getOrDefault("")
-        if (!verifyLettaJsPin(rootfsDir, manifestTextForPin)) {
+        val pinOutcome = verifyLettaJsPin(rootfsDir, manifestTextForPin)
+        if (!pinOutcome.allowBoot) {
             setStatus("failed: letta.js integrity")
             updateNotification("Integrity: letta.js")
             log("SECURITY: letta.js pre-patch pin failed — Launch blocked.")
@@ -1062,7 +1178,12 @@ class LettaEnvironmentService : Service() {
                 val installedV = org.json.JSONObject(
                     File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/package.json").readText()
                 ).optString("version", "")
-                installedV == parseManifestPinVersion(manifestTextForPin)
+                // Review 2733: installedV alone must not disarm the fail-
+                // closed 0-site block (agent-writable file). Re-derive from
+                // the gate outcome — the Keystore-backed decision already
+                // established pinned vs upgraded.
+                installedV == parseManifestPinVersion(manifestTextForPin) &&
+                    pinOutcome.decision == PinState.PIN_APPLIES
             }.getOrDefault(false)
             if (pinWasApplied) {
                 log("SECURITY: 0 patch sites after pin-verified authority restore — patcher broken vs upstream. Blocking boot.")
@@ -1071,6 +1192,36 @@ class LettaEnvironmentService : Service() {
                 return
             }
             log("PATCH: 0 sites on unpinned (upgraded) install — warning only")
+        }
+
+        // First-boot record (Angus, three-way forensics): a pinned install
+        // with NO record gets one NOW — after patching succeeded, over the
+        // post-patch bytes that actually exist on disk at boot. Later boots
+        // distinguish "never recorded" (absent + version==pin) from "record
+        // deleted by attacker" (absent + version!=pin) from "genuinely
+        // upgraded" (valid record, version!=pin).
+        if (pinOutcome.writeFirstBootRecord) {
+            runCatching {
+                writeUpgradeRecord(pinOutcome.pinVersion!!, sha256Of(lettaJs(rootfsDir)))
+            }.onFailure { log("UPGRADE-RECORD: first-boot write failed: ${it.message}") }
+        }
+        // Record refresh (app-update drift, upgraded installs): if THIS app
+        // version's patch patterns rewrote letta.js differently than the app
+        // that performed the upgrade, the on-disk sha no longer matches the
+        // record and the NEXT boot would read UPGRADED_TAMPERED (determin-
+        // istic brick). The pin gate just proved these bytes safe to run;
+        // recording the new post-patch sha (same version, service-written)
+        // keeps the tamper check accurate without downgrading protection —
+        // an attacker rewriting letta.js can NEVER reach this line (the
+        // gate above restored-or-blocked before patching).
+        else if (pinOutcome.decision == PinState.UPGRADED_UNPINNED) {
+            val postPatch = runCatching { sha256Of(lettaJs(rootfsDir)) }.getOrDefault("")
+            if (postPatch.isNotEmpty() && postPatch != pinOutcome.recordSha) {
+                runCatching {
+                    writeUpgradeRecord(pinOutcome.recordVersion ?: "", postPatch)
+                    log("UPGRADE-RECORD: refreshed post-patch sha (app-update patch drift)")
+                }.onFailure { log("UPGRADE-RECORD: refresh write failed: ${it.message}") }
+            }
         }
 
         val libPath = libDir.absolutePath
@@ -1930,47 +2081,81 @@ class LettaEnvironmentService : Service() {
      * so post-patch bytes legitimately differ from the pin. Ordering is
      * gate-then-patch: this check runs BEFORE any patching.
      *
-     * Version scoping: npm upgrades legitimately replace letta.js with
-     * unpinned bytes (set-3's exact-pin + version-assert owns that path).
-     * The pin applies ONLY while the installed package version equals the
-     * manifest's pin-version header. While it applies:
+     * Version scoping (review 2733, option A): the pin applies while the
+     * install is pinned OR no Keystore-MACed upgrade record blesses a
+     * different version — the agent-writable package.json alone can no
+     * longer disarm it. While it applies:
      *   - missing file            → restore from the rootfs.tar member
      *   - hash mismatch           → restore from the rootfs.tar member
      *                               (rollback of in-place tampering; a legit
      *                               upgrade would have bumped the version)
      *   - restore fails           → BLOCK boot (fail-closed)
-     * Returns false = boot must be blocked.
+     * Returns PinOutcome; allowBoot=false = boot must be blocked.
      */
-    private fun verifyLettaJsPin(rootfsDir: File, manifestText: String): Boolean {
+    private fun verifyLettaJsPin(rootfsDir: File, manifestText: String): PinOutcome {
         val entries = parseIntegrityManifest(manifestText)
         val entry = entries.firstOrNull { it.dest == "npm/letta.js" } ?: run {
             log("PATCH-PIN: no npm/letta.js manifest entry (old manifest?) — pin inactive")
-            return true
+            return PinOutcome(true, null, null, false)
         }
         val pinVersion = parseManifestPinVersion(manifestText)
         if (pinVersion == null) {
             log("PATCH-PIN: manifest has letta.js entry but no pin-version header — pin inactive (generator regen needed)")
-            return true
+            return PinOutcome(true, null, null, false)
         }
         val installedPkg = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/package.json")
         val installedV = runCatching {
             org.json.JSONObject(installedPkg.readText()).optString("version", "")
         }.getOrDefault("")
-        if (installedV != pinVersion && installedV.isNotEmpty()) {
-            // Upgraded install — letta.js is not the pinned build's bytes.
-            // Tamper protection for upgraded copies is post-install only;
-            // the npm chain (set 3) owns install-time integrity.
-            log("PATCH-PIN: installed $installedV != pin-version $pinVersion — pin not applied (upgraded install)")
-            return true
+
+        // Keystore-backed decision (review 2733 option A): the agent-writable
+        // installedV is EVIDENCE, never authority — only a Keystore-MACed
+        // record written by the service can bless a version as genuinely
+        // upgraded. See decidePinState for the full decision table.
+        val record = readUpgradeRecord()
+        val state = decidePinState(
+            recordValid = record?.first == true,
+            recordVersion = record?.second ?: "",
+            recordSha = record?.third ?: "",
+            currentSha = runCatching { sha256Of(lettaJs(rootfsDir)) }.getOrDefault(""),
+            pinVersion = pinVersion,
+        )
+        when (state) {
+            PinState.UPGRADED_UNPINNED -> {
+                // Record VALID + version != pin + current sha == record sha:
+                // the service itself installed this and letta.js is intact.
+                log("PATCH-PIN: upgrade record valid (version ${record!!.second}) — pin not applied " +
+                    "(genuine npm upgrade, post-patch sha matched)")
+                return PinOutcome(true, state, pinVersion, false, record.second, record.third)
+            }
+            PinState.UPGRADED_TAMPERED -> {
+                // Record VALID + version != pin + sha MISMATCH: something
+                // rewrote letta.js after the service blessed it. BLOCK.
+                log("SECURITY: PATCH-PIN — letta.js sha does not match the Keystore-backed upgrade record " +
+                    "(post-upgrade tamper; record version ${record!!.second}) — blocking boot")
+                return PinOutcome(false, state, pinVersion, false)
+            }
+            PinState.PIN_APPLIES -> {
+                // Fresh pinned install, valid-record pinned install, record
+                // ABSENT, or MAC-INVALID. Three-way forensics in the log
+                // (Angus): "never recorded" / "forged by attacker" /
+                // "genuinely upgraded" must read differently.
+                if (record == null) {
+                    log("PATCH-PIN: no upgrade record — treating as pinned install " +
+                        "(never recorded, or record deleted; pin re-arms)")
+                } else if (!record.first) {
+                    log("PATCH-PIN: upgrade record MAC INVALID — forged record ignored, pin applies " +
+                        "(fail-closed; prefs are agent-writable, the Keystore key is not)")
+                }
+                if (installedV.isEmpty()) {
+                    // package.json missing/corrupt: an authority install
+                    // ALWAYS has a readable version. Unreadable = tamper or
+                    // corruption; the pin must stay armed.
+                    log("PATCH-PIN: installed version unreadable — enforcing pin (fail-closed)")
+                }
+            }
         }
-        if (installedV.isEmpty()) {
-            // package.json missing/corrupt: an authority install ALWAYS has a
-            // readable version — unreadable means tamper or corruption, and
-            // treating it as "upgraded" would let a corrupted package.json
-            // deactivate the pin while a tampered letta.js boots. Enforce.
-            log("PATCH-PIN: installed version unreadable — enforcing pin (fail-closed)")
-        }
-        val lettaJs = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js")
+        val lettaJs = lettaJs(rootfsDir)
         val actual = runCatching { sha256Of(lettaJs) }.getOrDefault("")
         if (actual != entry.sha256) {
             log("PATCH-PIN: letta.js ${if (lettaJs.exists()) "hash mismatch" else "missing"} on pinned install — " +
@@ -1979,13 +2164,89 @@ class LettaEnvironmentService : Service() {
                 sha256Of(lettaJs) == entry.sha256
             if (!ok) {
                 log("SECURITY: PATCH-PIN restore failed or restored bytes still wrong — blocking boot")
-                return false
+                return PinOutcome(false, PinState.PIN_APPLIES, pinVersion, false)
             }
             log("PATCH-PIN: authority bytes restored")
-            return true
+            // First-boot record only when ABSENT (Angus): an existing
+            // valid pinned record or an attacker-forged invalid one is
+            // never rewritten here — the next real upgrade overwrites it.
+            return PinOutcome(true, PinState.PIN_APPLIES, pinVersion, record == null)
         }
         log("PATCH-PIN: letta.js pre-patch pin verified ($actual)")
-        return true
+        return PinOutcome(true, PinState.PIN_APPLIES, pinVersion, record == null)
+    }
+
+    private fun lettaJs(rootfsDir: File): File =
+        File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js")
+
+    /**
+     * Keystore-backed upgrade record (Oct 8 review 2733, option A).
+     *
+     * Record = "version|sha256" where the sha is of letta.js AS IT EXISTS
+     * ON DISK at record time — callers write it only after applyLettaJsPatches
+     * succeeds (POST-patch bytes), so no upgraded boot ever false-alarms the
+     * tamper check. MAC = HmacSHA256(record) under a non-exportable
+     * AndroidKeyStore key. The agent shell shares this uid: it can read,
+     * modify, or delete the prefs entry, but it can NEVER forge the MAC —
+     * a record claiming "0.35.0 is a genuine upgrade" is only believable
+     * when the service itself wrote it.
+     *
+     * Keystore failures (provider missing, key gen failure) fail CLOSED
+     * (null MAC): no record is written / none verifies, and verifyLettaJsPin
+     * keeps the pin armed.
+     */
+    private fun keystoreMac(data: ByteArray): ByteArray? = try {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (!ks.containsAlias(UPGRADE_RECORD_KEY_ALIAS)) {
+            val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, "AndroidKeyStore")
+            kg.init(
+                KeyGenParameterSpec.Builder(
+                    UPGRADE_RECORD_KEY_ALIAS,
+                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+                ).build()
+            )
+            kg.generateKey()
+        }
+        val key = ks.getKey(UPGRADE_RECORD_KEY_ALIAS, null) as? SecretKey ?: return null
+        Mac.getInstance("HmacSHA256").apply { init(key) }.doFinal(data)
+    } catch (_: Exception) {
+        null // fail-closed: unverifiable record -> pin applies
+    }
+
+    private fun writeUpgradeRecord(version: String, lettaJsSha256: String) {
+        try {
+            val payload = "$version|$lettaJsSha256"
+            val mac = keystoreMac(payload.toByteArray(Charsets.UTF_8))
+            if (mac == null) {
+                log("UPGRADE-RECORD: keystore unavailable — record NOT written; pin stays armed")
+                return
+            }
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_UPGRADE_RECORD, payload)
+                .putString(PREF_UPGRADE_RECORD_MAC, mac.joinToString("") { "%02x".format(it) })
+                .apply()
+            log("UPGRADE-RECORD: recorded version $version (keystore-MACed, post-patch sha)")
+        } catch (e: Exception) {
+            log("UPGRADE-RECORD: write failed: ${e.message}")
+        }
+    }
+
+    /**
+     * null = no record stored. Otherwise Triple(macValid, version, sha) —
+     * macValid=false means the stored record failed MAC verification
+     * (attacker-modified payload, or a MAC minted under a different key /
+     * after a device reset). Callers treat both "no record" and "invalid
+     * record" as fail-closed via decidePinState.
+     */
+    private fun readUpgradeRecord(): Triple<Boolean, String, String>? {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val payload = prefs.getString(PREF_UPGRADE_RECORD, null) ?: return null
+        val macHex = prefs.getString(PREF_UPGRADE_RECORD_MAC, null) ?: return null
+        val parts = payload.split('|')
+        if (parts.size != 2) return Triple(false, parts.getOrNull(0) ?: "", parts.getOrNull(1) ?: "")
+        val expected = keystoreMac(payload.toByteArray(Charsets.UTF_8)) ?: return Triple(false, parts[0], parts[1])
+        val valid = macHex.lowercase(Locale.ROOT) == expected.joinToString("") { "%02x".format(it) }
+        return Triple(valid, parts[0], parts[1])
     }
 
     /**
