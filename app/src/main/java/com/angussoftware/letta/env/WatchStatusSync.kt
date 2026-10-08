@@ -174,6 +174,16 @@ object WatchStatusSync {
  */
 class WatchStatusSyncListenerService : com.google.android.gms.wearable.WearableListenerService() {
     override fun onDataChanged(events: DataEventBuffer) {
+        // Security (adversarial review Oct 8): exported service — reject any
+        // direct bind whose caller is not Google Play services (same gate as
+        // the key-sync listener; forged events could otherwise drive the
+        // foreground/Watch-card paths).
+        val gmsUid = packageManager.getPackageUid("com.google.android.gms", 0)
+        val binderUid = android.os.Binder.getCallingUid()
+        if (gmsUid != -1 && binderUid != gmsUid && binderUid != android.os.Process.myUid()) {
+            Log.w(WatchStatusSync.TAG, "status-sync bind rejected: uid $binderUid is not GMS")
+            return
+        }
         val isWatch = packageManager.hasSystemFeature(
             android.content.pm.PackageManager.FEATURE_WATCH
         )

