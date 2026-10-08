@@ -11,7 +11,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.security.MessageDigest
 import java.nio.file.Files
+import java.util.zip.GZIPInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,6 +73,73 @@ class LettaEnvironmentService : Service() {
         /** Null unless the env name matches the strict shape. */
         fun validatedEnv(raw: String?): String? =
             raw?.trim()?.takeIf { ENV_REGEX.matches(it) }
+
+        /**
+         * Integrity manifest entry (review 2731, PR #118). Parsed from the
+         * APK asset integrity-manifest.txt — the single authority. The
+         * filesDir copy of the manifest is diagnostics-only.
+         *
+         * source semantics:
+         *   asset:<name>  — restore bytes = the APK asset <name> (immutable).
+         *   rootfs:<path> — filesDir/<path> is UNTRUSTED CACHE; the true
+         *                   authority bytes live in the tar member (member
+         *                   field, or the path itself) of the APK's pinned
+         *                   rootfs.tar asset. Install order: write-cache from
+         *                   the untrusted copy ONLY if it already matches the
+         *                   manifest hash; restore from the tar member
+         *                   otherwise (direct-asset fallback first).
+         */
+        internal data class ManifestEntry(
+            val dest: String,          // path under filesDir; "libs/x" allowed
+            val sha256: String,        // lowercase hex authority hash
+            val source: String,        // "asset:NAME" or "rootfs:PATH"
+            val member: String?,       // real member name when rootfs path is a symlink
+            val optional: Boolean,     // verify-if-present: absence tolerated
+        ) {
+            val destFileBase: String get() = dest.substringAfterLast('/')
+        }
+
+        /**
+         * Parse the APK asset integrity-manifest.txt. NEVER reads the
+         * filesDir copy (an attacker could plant a permissive manifest
+         * there — the asset inside the signed APK is the only authority).
+         */
+        internal fun parseIntegrityManifest(text: String): List<ManifestEntry> {
+            val out = ArrayList<ManifestEntry>(32)
+            for (rawLine in text.lineSequence()) {
+                val line = rawLine.trim()
+                if (line.isEmpty() || line.startsWith("#")) continue
+                val cols = line.split('\t')
+                if (cols.size < 3) continue
+                val dest = cols[0]
+                val sha = cols[1].lowercase(Locale.ROOT)
+                val source = cols[2]
+                // 'optional' may appear as col4 (no tar-member) or col5 —
+                // never treat it as a member name.
+                val member = cols.getOrNull(3)?.takeIf { it.isNotBlank() && it != "optional" }
+                    ?: cols.getOrNull(4)?.takeIf { it.isNotBlank() && it != "optional" }
+                val optional = cols.getOrNull(3)?.trim() == "optional" ||
+                    cols.getOrNull(4)?.trim() == "optional"
+                if (dest.isEmpty() || !source.startsWith("asset:") && !source.startsWith("rootfs:")) continue
+                if (!sha.matches(Regex("^[0-9a-f]{64}$"))) continue
+                out.add(ManifestEntry(dest, sha, source, member, optional))
+            }
+            return out
+        }
+
+        /** Chunked-stream sha256 (never loads whole files into memory). */
+        internal fun sha256Of(f: File): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            f.inputStream().use { s ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = s.read(buf)
+                    if (n < 0) break
+                    md.update(buf, 0, n)
+                }
+            }
+            return md.digest().joinToString("") { "%02x".format(it) }
+        }
         // Dedicated channel for the persistent environment-running notification so users
         // can control it independently from any future alert channels.
         private const val CHANNEL_ID = "letta-env-status"
@@ -798,29 +867,6 @@ class LettaEnvironmentService : Service() {
             return
         }
 
-        // Security (Oct 8 set 2): files/libs is in the loader search path AND
-        // agent-writable. installSupportFiles now verify-or-restores, but a
-        // hostile turn can write AFTER install and BEFORE launch within one
-        // session. Final gate: enumerate files/libs and refuse to launch if
-        // it holds anything outside the expected set (unknown file = planted
-        // payload; known-name-but-wrong-content handled by the restore pass).
-        val filesLibsDir = File(filesDir, "libs")
-        if (filesLibsDir.isDirectory) {
-            val expected = hashSetOf(
-                "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
-                "libgcc_s.so.1", "libstdc++.so.6", "libtinfo.so.6", "libresolv.so.2",
-                "pty.node", "sharp-linux-arm64.node", "libvips-cpp.so.8.17.3",
-                "dnsport.so"
-            )
-            val foreign = filesLibsDir.listFiles()?.map { it.name }?.filter { it !in expected }.orEmpty()
-            if (foreign.isNotEmpty()) {
-                setStatus("integrity check failed — unexpected files in libs")
-                updateNotification("Integrity: foreign files removed")
-                log("SECURITY: foreign files in files/libs (planted?): $foreign — removed, launch blocked this attempt. A hostile agent turn may have attempted a preload implant.")
-                foreign.forEach { File(filesLibsDir, it).delete() }
-                return
-            }
-        }
         if (apiKey().isBlank()) {
             setStatus("no api key — open the app to configure")
             updateNotification("Needs API key")
@@ -880,6 +926,23 @@ class LettaEnvironmentService : Service() {
 
         installSupportFiles(rootfsDir, libDir)
         sweepStaleListenerLocks(rootfsDir)
+
+        // SECURITY BOOT GATE (Oct 8 set 2 / review 2731): files/libs is in
+        // the loader search path AND agent-writable. installSupportFiles just
+        // verify-restored every manifest entry from APK authority, so this
+        // gate runs AFTER it — anything still wrong here was written between
+        // the restore pass and this moment (active in-session tampering), or
+        // the restore itself failed. Expected set DERIVES from the manifest
+        // (no hand-copied literal): foreign file → delete + block; required
+        // entry missing → block (restore failed); present-but-hash-mismatch
+        // → block. OPTIONAL entries (verify-if-present) tolerate absence.
+        val gateVerdict = integrityGate()
+        if (gateVerdict != null) {
+            setStatus(gateVerdict.first)
+            updateNotification(gateVerdict.second)
+            log("SECURITY: ${gateVerdict.third} Launch blocked.")
+            return
+        }
 
         // Re-apply letta.js patches on every start: npm-upgraded installs
         // (upgrade button) land unpatched until the NEXT upgrade, and the
@@ -1216,73 +1279,108 @@ class LettaEnvironmentService : Service() {
         val libPath = libDir.absolutePath + ":" + filesLibs.absolutePath
         val loaderFlag = "${File(libDir, "libldlnx.so").absolutePath} --library-path $libPath"
 
-        // original-name glibc libs: copied from rootfs (byte-patched, never patchelf'd).
-        // The loader maps app_data files fine (proven); sonames resolve by original names.
-        val libSources = listOf(
-            File(rootfsDir, "lib/aarch64-linux-gnu") to listOf("libc.so.6", "libm.so.6", "libdl.so.2"),
-            File(rootfsDir, "usr/lib/aarch64-linux-gnu") to listOf("libpthread.so.0", "libgcc_s.so.1", "libstdc++.so.6", "libtinfo.so.6", "libresolv.so.2")
-        )
+        // Security (review 2731, PR #118): APK-asset sha256 manifest is the
+        // single integrity authority for everything agent-writable that the
+        // server loads (glibc libs + native addons in the loader path, the
+        // two NODE_OPTIONS preload shims, dnsport.so). The rootfs copy of a
+        // lib is UNTRUSTED CACHE — restore bytes come from immutable APK
+        // sources: the named asset, or a member of the APK's pinned
+        // rootfs.tar asset. This closes both review blockers: length-only
+        // addon compare (now full sha256) and the laundering path (rootfs
+        // was the "trusted" restore source while itself agent-writable).
+        val manifest = readIntegrityManifest()
+        if (manifest.isEmpty()) {
+            log("SECURITY: integrity manifest missing/unparseable in APK assets — " +
+                "build defect. Files populated with legacy semantics; boot gate will block.")
+        }
         filesLibs.mkdirs()
-        for ((dir, names) in libSources) {
-            for (n in names) {
-                val dst = File(filesLibs, n)
-                val src = File(dir, n)
-                // Security (Oct 8 review, set 2): files/libs sits in the
-                // agent-writable loader search path. A hostile turn could
-                // drop a trojaned libstdc++.so.6 here and own every later
-                // boot. Skip-if-exists preserved whatever was there. Now:
-                // verify byte-equality against the rootfs source (the
-                // trusted copy) and REPLACE on mismatch — the writable copy
-                // is a cache of a trusted file, never a source of truth.
-                if (src.exists() && (!dst.exists() || dst.length() != src.length())) {
-                    src.copyTo(dst, overwrite = true)
-                } else if (src.exists() && dst.exists()) {
-                    // length matches — full byte compare (small files, rare path)
-                    if (!src.inputStream().use { s -> dst.inputStream().use { d -> s.readBytes().contentEquals(d.readBytes()) } }) {
-                        log("integrity: $n in files/libs tampered — restoring from rootfs")
-                        src.copyTo(dst, overwrite = true)
+        var manifestRestores = 0
+        // Single rootfs.tar scan: collect ALL rootfs-sourced entries needing
+        // authority restore and extract them in ONE pass over the asset —
+        // per-entry scans would re-decompress the 194MB tarball per file.
+        val tarRestores = LinkedHashMap<File, String>() // dst -> member
+        for (e in manifest) {
+            val dst = File(filesDir, e.dest)
+            dst.parentFile?.mkdirs()
+            // Healthy cache: bytes already match authority — leave untouched.
+            if (dst.exists() && sha256Of(dst) == e.sha256) continue
+            val existed = dst.exists()
+            when {
+                e.source.startsWith("asset:") -> {
+                    val name = e.source.removePrefix("asset:")
+                    assets.open(name).use { input ->
+                        dst.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
+                    }
+                    log("integrity: ${e.dest} ${if (existed) "rewritten" else "installed"} from APK asset $name")
+                    manifestRestores++
+                }
+                e.source.startsWith("rootfs:") -> {
+                    val rpath = e.source.removePrefix("rootfs:")
+                    val untrusted = File(rootfsDir, rpath)
+                    // Write-cache from the rootfs copy ONLY when it already
+                    // matches the manifest — otherwise it is not authority.
+                    val untrustedOk = untrusted.exists() && sha256Of(untrusted) == e.sha256
+                    val member = "./" + (e.member ?: rpath)
+                    // Authority restore: ALWAYS prefer the tar member over the
+                    // untrusted rootfs cache when the cache doesn't match.
+                    if (untrustedOk) {
+                        untrusted.copyTo(dst, overwrite = true)
+                        log("integrity: ${e.dest} written from hash-verified rootfs cache")
+                        manifestRestores++
+                    } else {
+                        tarRestores[dst] = member
                     }
                 }
             }
         }
-        // native addons into files/libs too (original names)
-        val nmRoot0 = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/node_modules")
-        val addons = listOf(
-            File(nmRoot0, "node-pty/build/Release/pty.node"),
-            File(nmRoot0, "@img/sharp-linux-arm64/lib/sharp-linux-arm64.node"),
-            File(nmRoot0, "@img/sharp-libvips-linux-arm64/lib/libvips-cpp.so.8.17.3")
-        )
-        for (a in addons) {
-            val dst = File(filesLibs, a.name)
-            // Security (set 2): verify-or-restore (same policy as the glibc
-            // libs above — the rootfs copy is trusted, files/libs is a cache).
-            if (a.exists() && (!dst.exists() || dst.length() != a.length())) {
-                a.copyTo(dst, overwrite = true)
+        if (tarRestores.isNotEmpty()) {
+            val results = extractRootfsTarMembers(tarRestores)
+            for ((dst, ok) in results) {
+                val member = tarRestores[dst]
+                if (ok) {
+                    log("integrity: ${dst.name} restored from rootfs.tar member $member")
+                    manifestRestores++
+                } else {
+                    // Member absent from THIS build's tar (e.g. optional sharp
+                    // addons on the pre-swap rootfs) AND no matching untrusted
+                    // cache: required entries will block at the gate; optional
+                    // entries simply stay absent. Never leave wrong bytes in
+                    // the loader path — delete rather than keep tampered.
+                    if (dst.exists()) {
+                        dst.delete()
+                        log("integrity: ${dst.name} unrestorable (tar member $member not in build) and failed manifest — deleted from loader path")
+                    }
+                }
             }
         }
+        if (manifest.isNotEmpty()) {
+            log("integrity manifest: ${manifest.size} entries, $manifestRestores (re)written")
+        }
+
+        // Legacy fallback (manifest empty = build defect): original-name
+        // glibc libs copied from rootfs so a malformed build still boots
+        // far enough to show its error. The boot gate still blocks launch.
+        val nmRoot0 = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/node_modules")
+        if (manifest.isEmpty()) {
+            for (dir in listOf(File(rootfsDir, "lib/aarch64-linux-gnu"), File(rootfsDir, "usr/lib/aarch64-linux-gnu"))) {
+                for (n in listOf("libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "libgcc_s.so.1", "libstdc++.so.6", "libtinfo.so.6", "libresolv.so.2")) {
+                    val src = File(dir, n)
+                    val dst = File(filesLibs, n)
+                    if (src.exists() && !dst.exists()) src.copyTo(dst)
+                }
+            }
+            for (a in listOf(
+                File(nmRoot0, "node-pty/build/Release/pty.node"),
+                File(nmRoot0, "@img/sharp-linux-arm64/lib/sharp-linux-arm64.node"),
+                File(nmRoot0, "@img/sharp-libvips-linux-arm64/lib/libvips-cpp.so.8.17.3")
+            )) {
+                if (a.exists() && !File(filesLibs, a.name).exists()) a.copyTo(File(filesLibs, a.name))
+            }
+        }
+        // dns-shim.js / fs-shim.js / libs/dnsport.so are no longer written
+        // here — the manifest pass above owns them (always rewritten from
+        // their APK assets, sha256-verified against the manifest).
         log("files/libs populated: ${filesLibs.listFiles()?.size} files")
-
-        // Security (set 2): the shims are preloaded into EVERY server
-        // process (NODE_OPTIONS --require). Skip-if-exists let a tampered
-        // shim persist across reinstalls. Always rewrite from the immutable
-        // APK asset — same policy as fs-shim below.
-        val shim = File(filesDir, "dns-shim.js")
-        assets.open("dns-shim.js").use { input ->
-            shim.outputStream().use { output -> input.copyTo(output) }
-        }
-        log("dns-shim.js installed (always-rewrite)")
-
-        // fs-shim.js — replaces link()/linkSync() with O_EXCL-write emulation
-        // (SELinux denies hard links on app storage; letta.js uses
-        // write-temp-then-link for ALL its lock files). Runtime preload is
-        // version-proof vs string-patching the bundle. Semantics verified:
-        // 50-way concurrency, EEXIST/ENOENT, mode preservation, ESM+CJS
-        // visibility (Sep 26).
-        val fsShim = File(filesDir, "fs-shim.js")
-        assets.open("fs-shim.js").use { input ->
-            fsShim.outputStream().use { output -> input.copyTo(output) }
-        }
-        log("fs-shim.js installed")
 
         val binDir = File(filesDir, "bin")
         binDir.mkdirs()
@@ -1356,7 +1454,7 @@ class LettaEnvironmentService : Service() {
         git.setExecutable(true, false)
         log("git wrapper installed")
 
-        // git-elf + gc-shim + dnsport.so: static ELF git chain (Sep 28).
+        // git-elf + gc-shim: static ELF git chain (Sep 28).
         // git-elf exec's the rootfs glibc loader with real git and
         // --preload dnsport.so (getaddrinfo override → local DNS forwarder).
         // gc-shim holds static ELF shims for git's dashed-dispatch child
@@ -1377,10 +1475,8 @@ class LettaEnvironmentService : Service() {
             }
             shim.setExecutable(true, false)
         }
-        val dnsport = File(File(filesDir, "libs"), "dnsport.so")
-        assets.open("dnsport.so").use { input ->
-            dnsport.outputStream().use { output -> input.copyTo(output) }
-        }
+        // dnsport.so now installs via the integrity manifest pass (sha256
+        // verified against the APK asset) — see the manifest loop above.
         val dnsForwarder = File(filesDir, "dns-forwarder.js")
         assets.open("dns-forwarder.js").use { input ->
             dnsForwarder.outputStream().use { output -> input.copyTo(output) }
@@ -1479,6 +1575,227 @@ class LettaEnvironmentService : Service() {
                 log("WARN: link failed for ${t.name}: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Read + parse the integrity manifest FROM THE APK ASSET (authority).
+     * Also writes a diagnostics copy to filesDir/integrity-manifest.txt —
+     * on-device agents can cat it to see what integrity is enforced; the
+     * copy is NEVER parsed for decisions (review 2731: the filesDir tree
+     * is attacker-writable).
+     */
+    private fun readIntegrityManifest(): List<ManifestEntry> {
+        val text = runCatching { assets.open("integrity-manifest.txt").bufferedReader().use { it.readText() } }
+            .getOrElse { e ->
+                log("integrity manifest asset read failed: ${e.message}")
+                return emptyList()
+            }
+        runCatching {
+            File(filesDir, "integrity-manifest.txt").writeText(text)
+        }
+        return parseIntegrityManifest(text)
+    }
+
+    /**
+     * Extract one member from the APK's rootfs.tar asset directly to dst
+     * (streamed; the 194MB tarball is never fully extracted). Restores
+     * authority bytes for rootfs-sourced libs WITHOUT trusting the on-disk
+     * rootfs cache. Member names inside rootfs.tar carry the "./" prefix;
+     * callers pass "./usr/lib/..." style names (see ManifestEntry).
+     */
+    /**
+     * Extract multiple members from the APK's rootfs.tar asset in ONE
+     * stream pass (the 194MB tarball is decompressed once regardless of
+     * how many entries need restore). Restores authority bytes for
+     * rootfs-sourced libs WITHOUT trusting the on-disk rootfs cache.
+     * Member names inside rootfs.tar carry the "./" prefix; callers pass
+     * "./usr/lib/..." style names. Returns dst -> extracted-ok; entries
+     * never found in the archive map to false (caller decides policy).
+     *
+     * Raw tar header scan (512-byte blocks, GNU long-name 'L' support) —
+     * flat memory regardless of member position. Writes go through
+     * temp-file + rename so a crash mid-extract never leaves a truncated
+     * lib in the loader search path.
+     */
+    private fun extractRootfsTarMembers(wanted: Map<File, String>): Map<File, Boolean> {
+        val result = wanted.keys.associateWith { false }.toMutableMap()
+        if (wanted.isEmpty()) return result
+        val remaining = HashMap<String, File>() // member -> dst (removed as found)
+        for ((dstF, member) in wanted) remaining[member] = dstF
+        val outBuf = ByteArray(64 * 1024)
+        runCatching {
+            assets.open("rootfs.tar").use { ain ->
+                GZIPInputStream(ain, 1 shl 16).use { gz ->
+                    val header = ByteArray(512)
+                    val nameField = ByteArray(100)
+                    val sizeField = ByteArray(12)
+                    while (true) {
+                        var off = 0
+                        while (off < 512) {
+                            val n = gz.read(header, off, 512 - off)
+                            if (n < 0) return@runCatching
+                            off += n
+                        }
+                        if (header.all { it == 0.toByte() }) return@runCatching // end-of-archive
+                        System.arraycopy(header, 0, nameField, 0, 100)
+                        System.arraycopy(header, 124, sizeField, 0, 12)
+                        var name = String(nameField).trimEnd('\u0000')
+                        // GNU long-name member (type 'L') carries the real name in its data.
+                        if (header[156] == 'L'.code.toByte()) {
+                            val lsize = parseTarOctal(sizeField)
+                            val ldata = ByteArray(lsize.toInt())
+                            var lo = 0
+                            while (lo < lsize.toInt()) {
+                                val n = gz.read(ldata, lo, (lsize - lo).toInt())
+                                if (n < 0) return@runCatching
+                                lo += n
+                            }
+                            name = String(ldata).trimEnd('\u0000', '\n')
+                            skipTarPadding(gz, lsize)
+                            // Next 512-block is the real header for that name.
+                            off = 0
+                            while (off < 512) {
+                                val n = gz.read(header, off, 512 - off)
+                                if (n < 0) return@runCatching
+                                off += n
+                            }
+                            System.arraycopy(header, 124, sizeField, 0, 12)
+                        }
+                        val size = parseTarOctal(sizeField)
+                        val dst = remaining.remove(name)
+                        if (dst != null) {
+                            // Write payload through a temp file + rename so a
+                            // crash mid-extract never leaves a truncated lib
+                            // in the loader search path.
+                            val tmp = File(dst.absolutePath + ".tmp-restore")
+                            var ok = true
+                            runCatching {
+                                tmp.outputStream().use { out ->
+                                    var rem = size
+                                    while (rem > 0) {
+                                        val n = gz.read(outBuf, 0, minOf(outBuf.size.toLong(), rem).toInt())
+                                        if (n < 0) return@runCatching
+                                        out.write(outBuf, 0, n)
+                                        rem -= n
+                                    }
+                                }
+                            }.onFailure { ok = false }
+                            if (ok && !dst.parentFile!!.exists()) dst.parentFile!!.mkdirs()
+                            if (ok) {
+                                if (dst.exists()) dst.delete()
+                                if (!tmp.renameTo(dst)) {
+                                    runCatching { tmp.copyTo(dst, overwrite = true) }
+                                        .onFailure { ok = false }
+                                    tmp.delete()
+                                }
+                            } else {
+                                tmp.delete()
+                                // Mid-member read failure: stream position is
+                                // unrecoverable — abort the whole scan; other
+                                // wanted entries map to false (caller logs).
+                                return@runCatching
+                            }
+                            if (ok) {
+                                result[dst] = true
+                                if (remaining.isEmpty()) return@runCatching
+                            }
+                            continue // payload fully consumed by the extract above
+                        }
+                        skipTarPayload(gz, size)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun parseTarOctal(field: ByteArray): Long {
+        // octal ASCII, possibly NUL/space-padded
+        var i = 0
+        while (i < field.size && (field[i] == ' '.code.toByte() || field[i] == 0.toByte())) i++
+        var v = 0L
+        while (i < field.size) {
+            val c = field[i]
+            if (c == 0.toByte() || c == ' '.code.toByte()) break
+            if (c < '0'.code.toByte() || c > '7'.code.toByte()) break
+            v = (v shl 3) or (c - '0'.code.toByte()).toLong()
+            i++
+        }
+        return v
+    }
+
+    private fun skipTarPayload(gz: java.io.InputStream, size: Long) {
+        var remaining = size + ((512 - (size % 512)) % 512)
+        while (remaining > 0) {
+            val n = gz.skip(remaining)
+            if (n > 0) { remaining -= n; continue }
+            // skip() returned 0 without consuming — force progress or die.
+            if (gz.read() < 0) return
+            remaining -= 1
+        }
+    }
+
+    private fun skipTarPadding(gz: java.io.InputStream, size: Long) {
+        val pad = ((512 - (size % 512)) % 512)
+        var remaining = pad
+        while (remaining > 0) {
+            val n = gz.skip(remaining)
+            if (n > 0) { remaining -= n; continue }
+            if (gz.read() < 0) return
+            remaining -= 1
+        }
+    }
+
+    /**
+     * Post-restore integrity gate (review 2731). Returns null = pass, or a
+     * (status, notification, logDetail) triple describing the block reason.
+     * The expected set and every hash come from the APK-asset manifest —
+     * nothing is hard-coded here. Runs AFTER installSupportFiles' restore
+     * pass, so any remaining failure is in-session tampering or a restore
+     * defect, both launch-blocking.
+     */
+    private fun integrityGate(): Triple<String, String, String>? {
+        val filesLibsDir = File(filesDir, "libs")
+        if (!filesLibsDir.isDirectory) return null // nothing installed yet — restore pass creates it
+        val manifest = readIntegrityManifest()
+        if (manifest.isEmpty()) {
+            return Triple(
+                "integrity check failed — manifest missing",
+                "Integrity: manifest unreadable",
+                "integrity manifest unparseable from APK assets — build defect.",
+            )
+        }
+        val libsEntries = manifest.filter { it.dest.startsWith("libs/") }
+        val byBase = libsEntries.associateBy { it.destFileBase }
+        val present = filesLibsDir.listFiles()?.map { it.name }.orEmpty()
+        val foreign = present.filter { it !in byBase.keys }
+        if (foreign.isNotEmpty()) {
+            foreign.forEach { File(filesLibsDir, it).delete() }
+            return Triple(
+                "integrity check failed — unexpected files in libs",
+                "Integrity: foreign files removed",
+                "foreign files in files/libs (planted?): $foreign — removed. A hostile agent turn may have attempted a preload implant.",
+            )
+        }
+        val missingRequired = libsEntries.filter { !it.optional && !File(filesLibsDir, it.destFileBase).exists() }
+        if (missingRequired.isNotEmpty()) {
+            return Triple(
+                "integrity check failed — missing libs",
+                "Integrity: required lib missing",
+                "required manifest entries absent after restore: ${missingRequired.map { it.destFileBase }} — restore failed.",
+            )
+        }
+        for (name in present) {
+            val e = byBase[name] ?: continue
+            if (sha256Of(File(filesLibsDir, name)) != e.sha256) {
+                return Triple(
+                    "integrity check failed — $name modified",
+                    "Integrity: $name mismatch",
+                    "$name in files/libs fails manifest sha256 AFTER restore pass — active tampering within session.",
+                )
+            }
+        }
+        return null
     }
 
     /**
