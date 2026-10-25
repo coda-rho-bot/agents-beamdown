@@ -156,7 +156,7 @@ steps:
         echo "versionCode=$VC versionName=$VN tag=$TAGV (previous-versionCode check: manual gate; no jq in image)"
         # set 4: fail loud if the signing toolchain is missing (cold volume)
         # — never silently skip verification.
-        [ -x "$ANDROID_HOME/build-tools/36.0.0/apksigner" ] || { echo "FATAL: apksigner missing on signing volume — bootstrap it (sdkmanager build-tools;36.0.0) before tagging"; exit 1; }
+        [ -x "$ANDROID_HOME/build-tools/36.0.0/apksigner" ] || { echo "FATAL: apksigner missing — the CI image is broken; rebuild ci-beamdown-jdk23-sdk36 via coda/ci-scripts before tagging"; exit 1; }
         $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -3
         mv "$APK" "agents-beamdown-${CI_COMMIT_TAG##*/}.apk"
       # Create the Forgejo release + attach the APK — TWICE, dual-publish:
