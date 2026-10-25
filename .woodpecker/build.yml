@@ -21,20 +21,12 @@ when:
 
 steps:
   build:
-    image: localhost:5000/ci-theming-jdk23:latest
+    image: localhost:5000/ci-beamdown-jdk23-sdk36:latest
     commands:
-      # Install Android SDK (required by AGP even for JVM-only steps)
-      - |
-        if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
-          mkdir -p $ANDROID_HOME/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
-          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-        else
-          echo "Android SDK cached, skipping install"
-        fi
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
-        echo "sdk.dir=$ANDROID_HOME" > local.properties
+      # SDK is baked into the image (R9-4b: repo 11 no longer trusts
+      # volume mounts, so the SDK volume is gone entirely). local.properties
+      # still needed for AGP to find it.
+      - echo "sdk.dir=$ANDROID_HOME" > local.properties
       # rootfs.tar is gitignored (~194MB) — asset merge needs it present.
       # Fetch the current build rootfs from the internal rootfs-source
       # release attachment. Leak-proof (PR #80 pattern, post-#287):
@@ -86,7 +78,3 @@ steps:
       ANDROID_HOME: /opt/android-sdk
       FORGEJO_TOKEN:
         from_secret: FORGEJO_TOKEN
-    volumes:
-      - gradle-cache-lettaenv:/root/.gradle/caches
-      - gradle-wrapper-lettaenv:/root/.gradle/wrapper
-      - android-sdk-lettaenv:/opt/android-sdk

@@ -38,20 +38,12 @@ when:
 
 steps:
   release:
-    image: localhost:5000/ci-theming-jdk23:latest
+    image: localhost:5000/ci-beamdown-jdk23-sdk36:latest
     commands:
-      # Install Android SDK
-      - |
-        if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
-          mkdir -p $ANDROID_HOME/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
-          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-        else
-          echo "Android SDK cached, skipping install"
-        fi
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
-        echo "sdk.dir=$ANDROID_HOME" > local.properties
+      # SDK is baked into the image (R9-4b class fix): apksigner/zipalign/aapt
+      # come from immutable image layers — a hostile PR has no volume to
+      # declare, nothing PR-writable persists between pipelines.
+      - echo "sdk.dir=$ANDROID_HOME" > local.properties
       # Fetch the build rootfs (gitignored, 162MB) from the internal
       # rootfs-source release. Leak-proof (PR #80 pattern, post-#287):
       # FORGEJO_TOKEN consumed ONLY via os.environ inside Python; zero
@@ -333,23 +325,3 @@ steps:
         from_secret: LETTAENV_KEYSTORE_B64
       LETTAENV_KEYSTORE_PASSWORD:
         from_secret: LETTAENV_KEYSTORE_PASSWORD
-    volumes:
-      - gradle-cache-lettaenv:/root/.gradle/caches
-      - gradle-wrapper-lettaenv:/root/.gradle/wrapper
-      # Security (Oct 8 set 4): signing pipeline gets its OWN sdk volume —
-      # the shared android-sdk-lettaenv was writable by PR builds (shared
-      # mount), letting a hostile PR trojan apksigner/zipalign and steal the
-      # keystore from the next tag build (adversarial review finding R9-4).
-      # Honest scope (review 2738 B3): this closes the SHARED-MOUNT path
-      # (a PR build invisibly writing into the volume the release job
-      # executes from). It does NOT stop a hostile PR from declaring this
-      # same volume itself — repo 11 is trusted (volumes: true, per-repo
-      # trust) with allow_pr, and PR pipelines run the config from the PR
-      # head, so a pushed branch can mount android-sdk-signing-lettaenv rw
-      # in its own pipeline and trojan it at PR-open. Residual: any user
-      # with push access can plant a trojan that the next tag build runs
-      # with keystore access. Full closure options tracked as R9-4b
-      # (follow-up filed Oct 8): repo-config-extension allowlist rejecting
-      # volume declarations in PR configs / trusted-off + image-baked SDK /
-      # post-sign verifier with pinned cert sha.
-      - android-sdk-signing-lettaenv:/opt/android-sdk
