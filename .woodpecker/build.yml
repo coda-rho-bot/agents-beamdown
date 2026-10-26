@@ -21,7 +21,7 @@ when:
 
 steps:
   build:
-    image: localhost:5000/ci-beamdown-jdk23-sdk36:latest
+    image: localhost:5000/ci-beamdown-jdk23-sdk36:jdk23-sdk36-bt3600-1
     commands:
       # SDK is baked into the image (R9-4b: repo 11 no longer trusts
       # volume mounts, so the SDK volume is gone entirely). local.properties

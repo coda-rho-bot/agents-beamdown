@@ -38,7 +38,7 @@ when:
 
 steps:
   release:
-    image: localhost:5000/ci-beamdown-jdk23-sdk36:latest
+    image: localhost:5000/ci-beamdown-jdk23-sdk36:jdk23-sdk36-bt3600-1
     commands:
       # SDK is baked into the image (R9-4b class fix): apksigner/zipalign/aapt
       # come from immutable image layers — a hostile PR has no volume to
