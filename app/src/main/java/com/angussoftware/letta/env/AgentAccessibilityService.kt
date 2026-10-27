@@ -236,6 +236,11 @@ class AgentAccessibilityService : AccessibilityService() {
 
     @Volatile private var consent: Consent? = null
     @Volatile private var consentPromptShowing = false
+    /** Single-flight token for the consent prompt (ANR/race fix, Uncia audit
+     *  2026-10-22 entry 2). CAS on entry; cleared ONLY after the overlay is
+     *  dismissed, so a replacement prompt can never interleave with the old
+     *  one's teardown. One prompt on screen, ever, by construction. */
+    private val consentGate = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Returns null when allowed; otherwise the refusal JSON to send. */
     private fun gate(): JSONObject? {
@@ -252,7 +257,13 @@ class AgentAccessibilityService : AccessibilityService() {
 
     /** Called on the SOCKET thread. Shows the overlay, waits for the user. */
     private fun requestConsent(req: JSONObject): JSONObject {
-        if (consentPromptShowing) return err().put("error", "a consent prompt is already showing")
+        // Single-flight by construction: atomic claim replaces the old
+        // check-then-act on @Volatile (two socket threads could both pass it,
+        // and the second showConsentOverlay's dismiss-first orphaned the first
+        // request's latch with mismatched intent text on screen).
+        if (!consentGate.compareAndSet(false, true)) {
+            return err().put("error", "a consent prompt is already showing")
+        }
         val desc = req.optString("desc", "unspecified agent action")
         val agent = req.optString("agent", "an agent")
         val seconds = req.optInt("seconds", 300).coerceIn(30, 3600)
@@ -269,8 +280,19 @@ class AgentAccessibilityService : AccessibilityService() {
                 onDeny = { approved = false; decided.countDown() })
         }
         val userAnswered = decided.await(120, java.util.concurrent.TimeUnit.SECONDS)
-        consentPromptShowing = false
-        mainHandler.post { dismissConsentOverlay() } // no-op if already dismissed
+        // Ordering fix: dismiss the overlay BEFORE releasing the gate. The old
+        // order (flag cleared, then dismiss posted) left a window where a new
+        // request claimed the flag, showed its overlay (which dismiss-firsts
+        // the old one), and the old request's late dismiss then killed the NEW
+        // prompt. With gate-release after dismissal, teardown completes first.
+        val dismissed = java.util.concurrent.CountDownLatch(1)
+        mainHandler.post {
+            dismissConsentOverlay() // no-op if already dismissed
+            dismissed.countDown()
+        }
+        dismissed.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        consentPromptShowing = false // legacy mirror (specs/help read it)
+        consentGate.set(false)
         return when {
             !userAnswered -> err().put("error", "no response within 120s — treated as deny")
             approved -> ok().put("session", desc).put("agent", agent)
