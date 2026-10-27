@@ -182,7 +182,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         when {
             p.getBoolean(UpdateManager.PREF_DL_DONE, false) ->
-                UpdateManager.install(this)
+                // Background thread: install() hashes ~495MB (sha gate) —
+                // on main this froze the UI for seconds (Uncia WILL-HURT
+                // Oct 25). installAsync runs the verification off-main and
+                // fires the installer intent from the main looper.
+                UpdateManager.installAsync(this)
             p.getLong(UpdateManager.PREF_DL_ID, -1) != -1L -> {
                 val paused = UpdateManager.downloadPauseReason(this, p.getLong(UpdateManager.PREF_DL_ID, -1)) != null
                 if (paused) {

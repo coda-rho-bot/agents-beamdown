@@ -793,7 +793,24 @@ object UpdateManager {
      * tick retries the install. Signature safety is enforced by Android
      * itself: an install with a mismatched signing certificate is refused.
      */
-    fun install(context: Context): Boolean {
+    fun install(context: Context): Boolean = installInternal(context)
+
+    /**
+     * UI-thread-safe entry (Uncia WILL-HURT Oct 25: hashing ~495MB on main
+     * froze the app for seconds). The sha verification + file IO run on a
+     * background thread; the installer intents fire from the application
+     * context with NEW_TASK, which is thread-safe. Result delivered to
+     * onResult on the main looper.
+     */
+    fun installAsync(context: Context, onResult: (Boolean) -> Unit = {}) {
+        val app = context.applicationContext
+        Thread {
+            val ok = installInternal(app)
+            android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(ok) }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    private fun installInternal(context: Context): Boolean {
         val app = context.applicationContext
         val p = prefs(app)
         // Install-time supersede: the download on disk may be for a tag the
