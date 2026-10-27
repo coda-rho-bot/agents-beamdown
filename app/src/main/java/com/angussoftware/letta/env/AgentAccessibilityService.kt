@@ -211,6 +211,15 @@ class AgentAccessibilityService : AccessibilityService() {
                 .recover { JSONObject().put("ok", false).put("error", it.message ?: it.javaClass.simpleName) }
                 .getOrThrow()
         }
+        // Gesture commands (ANR fix): dispatchGesture posts to the a11y
+        // pipeline itself and its result callback arrives via binder — the
+        // socket thread can await the latch directly. Running them on main
+        // would block main on the very callbacks main delivers.
+        if (cmd == "tap" || cmd == "longPress" || cmd == "swipe") {
+            return runCatching { handle(cmd, req) }
+                .recover { JSONObject().put("ok", false).put("error", it.message ?: it.javaClass.simpleName) }
+                .getOrThrow()
+        }
         val latch = java.util.concurrent.CountDownLatch(1)
         var result = JSONObject().put("ok", false).put("error", "no handler")
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -531,7 +540,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun gestureTap(x: Double, y: Double, durationMs: Double): JSONObject {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        return dispatch(path, durationMs, "tap($x,$y)")
+        return dispatchAwait(path, durationMs, "tap($x,$y)")
     }
 
     private fun gestureSwipe(fx: Double, fy: Double, tx: Double, ty: Double, durationMs: Double): JSONObject {
@@ -539,10 +548,20 @@ class AgentAccessibilityService : AccessibilityService() {
             moveTo(fx.toFloat(), fy.toFloat())
             lineTo(tx.toFloat(), ty.toFloat())
         }
-        return dispatch(path, durationMs, "swipe($fx,$fy -> $tx,$ty)")
+        return dispatchAwait(path, durationMs, "swipe($fx,$fy -> $tx,$ty)")
     }
 
-    private fun dispatch(path: Path, durationMs: Double, label: String): JSONObject {
+    /**
+     * ANR fix (Uncia audit 2026-10-22 entry 1): the old dispatch() awaited its
+     * own 10s gesture latch while RUNNING ON MAIN — a missed/cancelled
+     * callback (OEM quirks; see gesturesBlocked history) wedged main for the
+     * full timeout, serially per command = input-event ANR territory.
+     * Restructure: dispatchGesture + callback bookkeeping happen wherever the
+     * caller runs, but the LATCH WAIT sits here and execute() now routes
+     * gesture commands to the socket thread (no main-handler hop) — main is
+     * never blocked on a gesture.
+     */
+    private fun dispatchAwait(path: Path, durationMs: Double, label: String): JSONObject {
         if (gesturesBlocked) return err()
             .put("error", "gestures blocked on this device (learned); use click/clickId")
         val done = java.util.concurrent.CountDownLatch(1)
