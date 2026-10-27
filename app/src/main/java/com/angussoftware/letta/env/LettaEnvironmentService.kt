@@ -251,6 +251,10 @@ class LettaEnvironmentService : Service() {
         // can control it independently from any future alert channels.
         private const val CHANNEL_ID = "letta-env-status"
         private const val NOTIFICATION_ID = 42
+        /** server.log rotation cap (2 MiB x2 files worst case). */
+        private const val MAX_LOG_BYTES = 2L * 1024 * 1024
+        /** server-stdout.log rotation cap (--debug flood; 8 MiB x2 worst case). */
+        private const val MAX_STDOUT_LOG_BYTES = 8L * 1024 * 1024
         @Volatile private var proc: Process? = null
         // Lifecycle state. Values: idle -> starting -> running -> stopping.
         // The worker holds "starting"/"running" ONLY while its process lives;
@@ -1355,6 +1359,13 @@ class LettaEnvironmentService : Service() {
             "export NODE_OPTIONS=\$OLDNO\n" +
             "exec ${libLoader.absolutePath} --library-path $combinedPath ${File(libDir, "libnode.so").absolutePath} $lettaJs server --env-name '${envName()}' --debug > ${File(filesDir, "server-stdout.log").absolutePath} 2>&1 < /dev/null\n"
         )
+        // server-stdout.log cap: the shell `>` truncates per launch, but a
+        // long-lived --debug session can still append unbounded within one
+        // run and old generations were never bounded across no-restart
+        // upgrades. Rotate pre-launch so the newest session always starts
+        // under the cap and one prior generation survives for post-mortem.
+        rotateIfLarge(File(filesDir, "server-stdout.log"), MAX_STDOUT_LOG_BYTES)
+        rotateIfLarge(File(filesDir, "dns-forwarder.log"), MAX_LOG_BYTES)
         val stdinFile = File(filesDir, "stdin.txt")
         if (!stdinFile.exists()) stdinFile.writeText("")
         launchScript.setExecutable(true, false)
@@ -2382,9 +2393,30 @@ class LettaEnvironmentService : Service() {
         }
     }
 
+    /**
+     * Append one status line to server.log, rotating at a size cap so the
+     * app's own log can never exhaust storage over an installed lifetime
+     * (Uncia WILL-HURT Oct 25: server.log grew unbounded, --debug-era lines
+     * persisted across restarts). One rotated generation (.1) is kept for
+     * post-mortem context; total worst case = 2x cap.
+     */
     private fun log(msg: String) {
+        rotateIfLarge(File(filesDir, "server.log"), MAX_LOG_BYTES)
         val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         File(filesDir, "server.log").appendText("[$ts] $msg\n")
+    }
+
+    /** Rotate f to f.1 (replacing any prior f.1) once it exceeds cap bytes. */
+    private fun rotateIfLarge(f: File, cap: Long) {
+        try {
+            if (f.length() > cap) {
+                val old = File(f.parentFile, f.name + ".1")
+                if (old.exists()) old.delete()
+                f.renameTo(old)
+            }
+        } catch (_: Exception) {
+            // rotation is hygiene — never block the log write on it
+        }
     }
 
     private fun setStatus(s: String) {
