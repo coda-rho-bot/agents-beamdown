@@ -10,23 +10,6 @@
 const fs = require("fs");
 const fsp = fs.promises;
 
-// Ambient-credential scrub (Uncia audit 2026-10-23 entry 1): node passes
-// its full environ to every child process, so any Bash-tool command run by
-// the resident agent could read the master Letta credential from its own
-// env — blast radius: Harry's Letta account. The server reads
-// LETTA_API_KEY from process.env at boot (before this deferred scrub
-// fires); after the first tick we delete it from the live process.env
-// object, so every LATER read (including each child spawn's environ copy)
-// sees it absent. If a future letta.js starts re-reading the env var late
-// rather than caching at boot, the server would surface auth failures
-// immediately (loud, not silent) — acceptable failure mode; revert gate is
-// the post-release E2E check.
-if (process.env.LETTA_API_KEY) {
-  process.nextTick(() => {
-    try { delete process.env.LETTA_API_KEY; } catch {}
-  });
-}
-
 // Preserve source file mode where the platform lets us (link() would keep
 // it). We read the mode stat first; failures fall back to plain write.
 function errEEXIST(src, dest) {
