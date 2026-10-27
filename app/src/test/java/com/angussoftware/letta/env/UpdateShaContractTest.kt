@@ -140,7 +140,11 @@ class UpdateShaContractTest {
 
     @Test
     fun `install gates on shaGate with a REFUSE branch`() {
-        val body = funBody(codeOnly(source()), "install")
+        // Threading refactor (Oct 27): the sha-gate body lives in
+        // installInternal; install() is a delegating wrapper. The contract
+        // follows the implementation — the REFUSE branch it asserts is
+        // upstream of the installer intent regardless of which name holds it.
+        val body = funBody(codeOnly(source()), "installInternal")
         assertTrue(
             "install must consult shaGate (B2: URL-present-but-unresolved " +
                 "must refuse, not fall back to the legacy warning)",
