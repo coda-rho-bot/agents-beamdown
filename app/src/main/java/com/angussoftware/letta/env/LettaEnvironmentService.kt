@@ -5,8 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.security.keystore.KeyGenParameterSpec
@@ -175,6 +178,29 @@ class LettaEnvironmentService : Service() {
         internal fun isStaleRootfsMarker(fileName: String, currentVersionCode: Int): Boolean =
             fileName.startsWith(".rootfs-extracted") && fileName != rootfsMarkerName(currentVersionCode)
 
+        /** First-run auto-upgrade trigger (0.4.34 item a): the check runs
+         *  when the stamped versionCode differs from the current one —
+         *  fresh installs (default -1) and every APK update (new
+         *  versionCode = fresh baked rootfs, exactly when the baked pin has
+         *  aged). A stamped-but-mismatched value (e.g. downgrade install)
+         *  also re-checks. */
+        internal fun shouldAutoUpgradeCheck(stampedVersionCode: Int, currentVersionCode: Int): Boolean =
+            stampedVersionCode != currentVersionCode
+
+        /** Strictly-newer semver compare for the auto-upgrade gate.
+         *  Numeric part-wise, NOT string compare — the pin case: baked
+         *  "0.34.4" vs latest "0.34.31" is NEWER part-wise ([0,34,31] >
+         *  [0,34,4]) despite the shorter string. Malformed or non-3-part
+         *  inputs (prerelease tags, "unknown", partial versions) are never
+         *  newer — fail-safe keeps the baked install. */
+        internal fun isNewerVersion(candidate: String, current: String): Boolean {
+            val c = candidate.split('.').mapNotNull { it.toIntOrNull() }
+            val b = current.split('.').mapNotNull { it.toIntOrNull() }
+            if (c.size != 3 || b.size != 3) return false
+            for (i in 0 until 3) if (c[i] != b[i]) return c[i] > b[i]
+            return false
+        }
+
                 internal fun parseManifestPinVersion(text: String): String? =
             text.lineSequence()
                 .firstOrNull { it.trim().startsWith("# letta.js pin-version:") }
@@ -286,6 +312,10 @@ class LettaEnvironmentService : Service() {
         private val pendingOp = java.util.concurrent.atomic.AtomicReference<PendingOp>(null)
         const val PREFS = "letta_env"
         const val PREF_KEY = "api_key"
+        // First-run auto-upgrade (0.4.34 item a): versionCode of the last
+        // COMPLETED latest-check. Default -1 = never checked. Keyed by
+        // versionCode so every APK update (fresh baked rootfs) re-arms it.
+        const val PREF_AUTO_UPGRADE_CHECKED_FOR = "auto_upgrade_checked_for"
         // Keystore-backed letta-upgrade record (Oct 8 review 2733, option A).
         // Key alias is FIXED: rotation-free by design (losing the key only
         // re-arms the pin — fail-closed, never fail-open).
@@ -752,11 +782,84 @@ class LettaEnvironmentService : Service() {
     }
 
     /**
+     * Hardened npm environment (Oct 8 set 3): scratch HOME created fresh per
+     * call (an agent-staged .npmrc cannot survive into npm's config
+     * discovery), registry pinned to the official endpoint (npm_config_
+     * registry env beats both .npmrc files), userconfig isolated to the
+     * scratch dir. Shared by the resolve (npm view) and install paths so
+     * both carry identical security properties.
+     */
+    private fun freshNpmEnv(): Map<String, String> {
+        val rootfsDir = File(filesDir, "rootfs")
+        val libDir = File(applicationInfo.nativeLibraryDir)
+        val npmHome = File(filesDir, "npm-home").apply {
+            deleteRecursively(); mkdirs()
+        }
+        return mapOf(
+            "HOME" to npmHome.absolutePath,
+            "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
+            "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
+            "SHELL" to File(File(filesDir, "bin"), "bash").absolutePath,
+            "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
+            "NODE_OPTIONS" to "--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}",
+            "UV_USE_IO_URING" to "0",
+            "npm_config_registry" to "https://registry.npmjs.org/",
+            "npm_config_userconfig" to File(npmHome, ".npmrc").absolutePath,
+            "npm_config_strict_ssl" to "true"
+        )
+    }
+
+    /**
+     * Resolve the latest published @letta-ai/letta-code version via
+     * `npm view` (exact-pin resolve — see upgradeLetta). Returns the version
+     * string, or null on timeout / start failure / no parseable version in
+     * the output. Null reasons stay distinguishable in server.log (timeout
+     * vs no-match) but are uniform to callers: resolve failed.
+     */
+    private fun resolveLatestVersion(npmCli: File, npmEnv: Map<String, String>): String? {
+        val libDir = File(applicationInfo.nativeLibraryDir)
+        val libLoader = File(libDir, "libldlnx.so")
+        val resolvePb = ProcessBuilder(
+            libLoader.absolutePath, "--library-path", npmEnv["LD_LIBRARY_PATH"]!!,
+            File(libDir, "libnode.so").absolutePath, npmCli.absolutePath,
+            "view", "@letta-ai/letta-code", "version"
+        ).apply {
+            environment().clear()
+            environment().putAll(npmEnv)
+            redirectErrorStream(true)
+        }
+        return try {
+            val rp = resolvePb.start()
+            // Stream-then-wait (review 2733 non-blocker): readText BEFORE
+            // waitFor made the 60s timeout decorative — a hung `npm view`
+            // with a full pipe blocked the reader thread forever and the
+            // worker never reached waitFor. Reader thread + bounded
+            // waitFor + destroyForcibly on timeout.
+            val outBuf = StringBuilder()
+            val reader = Thread {
+                try {
+                    rp.inputStream.bufferedReader().forEachLine { outBuf.appendLine(it) }
+                } catch (_: Exception) {}
+            }.also { it.isDaemon = true; it.start() }
+            val fin = rp.waitFor(60, TimeUnit.SECONDS)
+            if (!fin) {
+                rp.destroyForcibly()
+                log("UPGRADE: npm view (resolve) timed out after 60s")
+                null
+            } else {
+                outBuf.toString().lineSequence().lastOrNull { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
+            }
+        } catch (t: Throwable) { null }
+    }
+
+    /**
      * Upgrade @letta-ai/letta-code inside the rootfs via npm, re-apply the
      * Android-specific letta.js patches (SELinux forbids the hardlink-based
      * locks), then hand back to runEnvironment() to relaunch the server.
+     * [preResolved]: when the caller already resolved the exact version
+     * (the first-run auto-upgrade path), skip the internal npm view.
      */
-    private fun upgradeLetta(): Boolean {
+    private fun upgradeLetta(preResolved: String? = null): Boolean {
         val libDir = File(applicationInfo.nativeLibraryDir)
         val libLoader = File(libDir, "libldlnx.so")
         val rootfsDir = File(filesDir, "rootfs")
@@ -791,58 +894,14 @@ class LettaEnvironmentService : Service() {
         //  - registry pinned on the CLI (npm_config_registry env beats both
         //    .npmrc files) to the official https endpoint
         //  - userconfig pointed at the scratch dir (no user .npmrc read)
-        val npmHome = File(filesDir, "npm-home").apply {
-            deleteRecursively(); mkdirs()
-        }
-        val npmEnv = mapOf(
-            "HOME" to npmHome.absolutePath,
-            "TMPDIR" to File(rootfsDir, "tmp").absolutePath,
-            "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
-            "SHELL" to File(File(filesDir, "bin"), "bash").absolutePath,
-            "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
-            "NODE_OPTIONS" to "--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}",
-            "UV_USE_IO_URING" to "0",
-            "npm_config_registry" to "https://registry.npmjs.org/",
-            "npm_config_userconfig" to File(npmHome, ".npmrc").absolutePath,
-            "npm_config_strict_ssl" to "true"
-        )
+        val npmEnv = freshNpmEnv()
         // Security (set 3): resolve @latest to an EXACT version first, then
         // install that exact version. A swapped-tag attack (registry serves
         // version X in the manifest, different content in the tarball) can
         // still theoretically diverge, but exact-pin + post-install version
         // assert (below) makes the common downgrade/redirect paths loud.
-        val resolvePb = ProcessBuilder(
-            libLoader.absolutePath, "--library-path", npmEnv["LD_LIBRARY_PATH"]!!,
-            File(libDir, "libnode.so").absolutePath, npmCli.absolutePath,
-            "view", "@letta-ai/letta-code", "version"
-        ).apply {
-            environment().clear()
-            environment().putAll(npmEnv)
-            redirectErrorStream(true)
-        }
-        val resolved = try {
-            val rp = resolvePb.start()
-            // Stream-then-wait (review 2733 non-blocker): readText BEFORE
-            // waitFor made the 60s timeout decorative — a hung `npm view`
-            // with a full pipe blocked the reader thread forever and the
-            // worker never reached waitFor. Same shape as the install path:
-            // reader thread + bounded waitFor + destroyForcibly on timeout.
-            val outBuf = StringBuilder()
-            val reader = Thread {
-                try {
-                    rp.inputStream.bufferedReader().forEachLine { outBuf.appendLine(it) }
-                } catch (_: Exception) {}
-            }.also { it.isDaemon = true; it.start() }
-            val fin = rp.waitFor(60, TimeUnit.SECONDS)
-            if (!fin) {
-                rp.destroyForcibly()
-                log("UPGRADE: npm view (resolve) timed out after 60s — aborting upgrade")
-                setStatus("upgrade failed: version resolve timeout")
-                updateNotification("Upgrade failed")
-                return true // previous install intact; boot it
-            }
-            outBuf.toString().lineSequence().lastOrNull { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
-        } catch (t: Throwable) { null }
+        // The auto-upgrade path pre-resolves and passes the pin in.
+        val resolved = preResolved ?: resolveLatestVersion(npmCli, npmEnv)
         if (resolved == null) {
             log("UPGRADE: failed to resolve latest version — aborting upgrade")
             setStatus("upgrade failed: version resolve")
@@ -959,6 +1018,66 @@ class LettaEnvironmentService : Service() {
         setStatus("upgraded to $after — restarting")
         updateNotification("Upgraded to $after — restarting")
         return true
+    }
+
+    /**
+     * Auto-upgrade network gate: unmetered AND internet-capable. Metered or
+     * offline boots defer the check to the next boot (no pref write).
+     */
+    private fun isUnmeteredOnline(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !cm.isActiveNetworkMetered
+    }
+
+    /**
+     * First-run letta auto-upgrade (0.4.34 item a). Once per APK
+     * versionCode, on an unmetered online network, resolve the latest
+     * published letta-code and upgrade the rootfs install when strictly
+     * newer than the baked pin. Called INSIDE runEnvironment after
+     * extraction and BEFORE the integrity gate — the gate then validates
+     * the post-upgrade state (same ordering as the manual upgrade's
+     * relaunch path, where the gate sees the upgraded install). Pre-launch
+     * means proc is null; upgradeLetta's proc?.destroy() is a no-op here.
+     *
+     * Pref semantics: the check stamps its versionCode once the RESOLVE
+     * succeeded — the upgrade outcome does not unstamp it (upgradeLetta's
+     * failure paths either boot the previous install safely or block boot
+     * with a visible status; both are terminal for this generation's
+     * check, and a persistent 0-patch-sites failure would otherwise
+     * re-download npm every boot). Metered / offline / failed-resolve
+     * boots stamp nothing and retry next boot; a persistently unreachable
+     * registry therefore retries every boot BY DESIGN — bounded (one npm
+     * view, unmetered-gated, silent) and self-completes on registry
+     * recovery.
+     */
+    private fun maybeAutoUpgradeLetta() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (!shouldAutoUpgradeCheck(prefs.getInt(PREF_AUTO_UPGRADE_CHECKED_FOR, -1), BuildConfig.VERSION_CODE)) return
+        if (!isUnmeteredOnline()) {
+            log("AUTO-UPGRADE: metered or offline — deferring check to next boot")
+            return
+        }
+        val rootfsDir = File(filesDir, "rootfs")
+        val nodeModules = File(rootfsDir, "usr/local/lib/node_modules")
+        val npmCli = File(nodeModules, "npm/bin/npm-cli.js")
+        val resolved = resolveLatestVersion(npmCli, freshNpmEnv())
+        if (resolved == null) {
+            log("AUTO-UPGRADE: resolve failed — deferring check to next boot")
+            return
+        }
+        // Resolve completed: stamp this generation's check as done.
+        prefs.edit().putInt(PREF_AUTO_UPGRADE_CHECKED_FOR, BuildConfig.VERSION_CODE).apply()
+        val baked = runCatching {
+            org.json.JSONObject(File(nodeModules, "@letta-ai/letta-code/package.json").readText())
+                .optString("version", "")
+        }.getOrDefault("")
+        if (!isNewerVersion(resolved, baked)) {
+            log("AUTO-UPGRADE: latest $resolved not newer than baked $baked — no upgrade")
+            return
+        }
+        log("AUTO-UPGRADE: $baked -> $resolved (first-run auto-upgrade)")
+        upgradeLetta(preResolved = resolved)
     }
 
     /**
@@ -1198,6 +1317,12 @@ class LettaEnvironmentService : Service() {
             marker.createNewFile()
             log("Rootfs extracted.")
         }
+
+        // First-run auto-upgrade (0.4.34 item a): post-extraction (rootfs
+        // complete), pre-gate (the integrity gate below then validates the
+        // post-upgrade state). No-op on every boot after the check for this
+        // versionCode has completed.
+        maybeAutoUpgradeLetta()
 
         if (!libLoader.exists()) {
             setStatus("failed: native lib dir missing loader (${libDir.absolutePath})")
