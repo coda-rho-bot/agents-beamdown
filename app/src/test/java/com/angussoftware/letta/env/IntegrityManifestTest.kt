@@ -176,9 +176,10 @@ class IntegrityManifestTest {
         // upgradeLetta must be Boolean; false = do not boot the fresh install.
         assertTrue(
             "upgradeLetta must return Boolean (false = freshly installed state must not boot)",
-            "private fun upgradeLetta(): Boolean" in t,
+            Regex("""private fun upgradeLetta\([^)]*\): Boolean""").containsMatchIn(t),
         )
-        val upg = t.substringAfter("private fun upgradeLetta(): Boolean")
+        // Anchor at the function start (params may evolve — the Boolean return is the contract).
+        val upg = t.substringAfter("private fun upgradeLetta(")
         val zeroBranch = upg.indexOf("0 patch sites in freshly installed letta.js")
         val zeroReturn = upg.indexOf("return false", zeroBranch)
         assertTrue(

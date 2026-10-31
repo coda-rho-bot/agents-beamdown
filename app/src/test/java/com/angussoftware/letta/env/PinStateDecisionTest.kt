@@ -120,7 +120,8 @@ class PinStateDecisionTest {
     @Test
     fun `upgrade record is written after applyLettaJsPatches succeeds - post-patch sha`() {
         val t = src()
-        val upg = t.substringAfter("private fun upgradeLetta(): Boolean")
+        // Anchor at the function start (params may evolve — the Boolean return is pinned in IntegrityManifestTest).
+        val upg = t.substringAfter("private fun upgradeLetta(")
         val patchAt = upg.indexOf("applyLettaJsPatches(nodeModules")
         val recordAt = upg.indexOf("writeUpgradeRecord(resolved")
         assertTrue(
@@ -214,7 +215,7 @@ class PinStateDecisionTest {
         // Review 2734 non-blocker (a): a swallowed record-write failure booted
         // an unrecorded upgrade that the next boot silently rolled back.
         val t = src()
-        val upg = t.substringAfter("private fun upgradeLetta(): Boolean")
+        val upg = t.substringAfter("private fun upgradeLetta(")
         val guardAt = upg.indexOf("if (!recordOk)")
         assertTrue(
             "record-write outcome must be checked (val recordOk + if (!recordOk)) — swallowing it " +
