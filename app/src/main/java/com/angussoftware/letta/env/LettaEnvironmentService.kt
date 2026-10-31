@@ -76,6 +76,15 @@ class LettaEnvironmentService : Service() {
         object UPGRADED_TAMPERED : PinState()
     }
 
+    /** R9-5 staging decision for a manifest-pinned payload tarball (Oct 22
+     *  finding #5). Class-level like PinState: the pure companion decision
+     *  returns it, the staging/restore wiring maps actions to effects —
+     *  OK = staged copy already matches the pin; RESTAGE = rewrite from the
+     *  immutable asset then write-verify; FATAL_* = never stage, never extract
+     *  — leave absent (the wrapper's self-heal download owns absence, not
+     *  corruption) and log the build-integrity break. */
+    internal enum class PayloadStageAction { OK, RESTAGE, FATAL_NO_PIN, FATAL_BROKEN_BUILD }
+
     /** Result of verifyLettaJsPin for the boot path (gate + first-boot record). */
     private data class PinOutcome(
         val allowBoot: Boolean,
@@ -241,14 +250,8 @@ class LettaEnvironmentService : Service() {
             return md.digest().joinToString("") { "%02x".format(it) }
         }
 
-        /** R9-5 staging decision for a manifest-pinned payload tarball (Oct 22
-         *  finding #5). Pure — I/O callers map actions to effects: OK = staged
-         *  copy already matches the pin; RESTAGE = rewrite from the immutable
-         *  asset then write-verify; FATAL_* = never stage, never extract —
-         *  leave absent (the wrapper's self-heal download owns absence, not
-         *  corruption) and log the build-integrity break. */
-        internal enum class PayloadStageAction { OK, RESTAGE, FATAL_NO_PIN, FATAL_BROKEN_BUILD }
-
+        /** R9-5 payload staging decision — pure, unit-tested directly
+         *  (PayloadStageDecisionTest), PinStateDecision pattern. */
         internal fun payloadStageDecision(
             manifestSha: String?, optional: Boolean,
             assetSha: String?, stagedSha: String?,
