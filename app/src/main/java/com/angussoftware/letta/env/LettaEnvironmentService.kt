@@ -1061,6 +1061,10 @@ class LettaEnvironmentService : Service() {
         val rootfsDir = File(filesDir, "rootfs")
         val nodeModules = File(rootfsDir, "usr/local/lib/node_modules")
         val npmCli = File(nodeModules, "npm/bin/npm-cli.js")
+        // freshNpmEnv() runs TWICE on the upgrade path (here for the
+        // resolve, again inside upgradeLetta for the install) — each call
+        // recreates the scratch HOME, which is the designed per-step
+        // freshness property. Do not "optimize" into sharing one env.
         val resolved = resolveLatestVersion(npmCli, freshNpmEnv())
         if (resolved == null) {
             log("AUTO-UPGRADE: resolve failed — deferring check to next boot")
