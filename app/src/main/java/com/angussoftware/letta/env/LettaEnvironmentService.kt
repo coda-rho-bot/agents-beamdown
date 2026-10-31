@@ -166,7 +166,16 @@ class LettaEnvironmentService : Service() {
          * (`# letta.js pin-version: X.Y.Z`, written by the generator). Null =
          * header absent (old manifest → pin inactive) or malformed.
          */
-        internal fun parseManifestPinVersion(text: String): String? =
+        internal fun rootfsMarkerName(versionCode: Int): String = ".rootfs-extracted-" + versionCode
+
+        /** Stale-marker decision (shape-(a) closure): a marker filename is
+         *  fresh only when it matches the CURRENT version key exactly. Old-key
+         *  markers and the pre-keying unversioned ".rootfs-extracted" are
+         *  stale — their trees get re-extracted from the APK rootfs. */
+        internal fun isStaleRootfsMarker(fileName: String, currentVersionCode: Int): Boolean =
+            fileName.startsWith(".rootfs-extracted") && fileName != rootfsMarkerName(currentVersionCode)
+
+                internal fun parseManifestPinVersion(text: String): String? =
             text.lineSequence()
                 .firstOrNull { it.trim().startsWith("# letta.js pin-version:") }
                 ?.substringAfter(':')?.trim()
@@ -1128,9 +1137,27 @@ class LettaEnvironmentService : Service() {
             return
         }
         val rootfsDir = File(filesDir, "rootfs")
-        val marker = File(filesDir, ".rootfs-extracted")
         val libDir = File(applicationInfo.nativeLibraryDir)
         val libLoader = File(libDir, "libldlnx.so")
+
+        // Shape-(a) durable closure (0.4.34): the extraction marker is KEYED
+        // by versionCode. An APK update that ships a new rootfs.tar has a new
+        // code; the stale marker (old key, or the pre-keying unversioned
+        // name) no longer matches, so the fresh rootfs re-extracts over the
+        // old one. Before this, a versionless ".rootfs-extracted" meant every
+        // APK update kept the PREVIOUS rootfs forever unless self-heal
+        // happened to trip — the stale-rootfs class that bit updates twice.
+        val marker = File(filesDir, rootfsMarkerName(BuildConfig.VERSION_CODE))
+
+        // Sweep stale markers: any extraction marker that is not the current
+        // key represents an older rootfs generation — drop it (and the tree
+        // it blessed) so the extraction below runs fresh.
+        filesDir.listFiles { f -> isStaleRootfsMarker(f.name, BuildConfig.VERSION_CODE) }
+            ?.forEach {
+                log("stale rootfs marker ${'$'}{it.name} (current key ${'$'}{marker.name}) — re-extracting")
+                it.delete()
+                rootfsDir.deleteRecursively()
+            }
 
         // Self-heal: corrupted earlier extraction leaves marker but incomplete rootfs.
         if (marker.exists() && !File(rootfsDir, "usr/local/bin/node").exists()) {
