@@ -78,3 +78,7 @@ steps:
       ANDROID_HOME: /opt/android-sdk
       FORGEJO_TOKEN:
         from_secret: FORGEJO_TOKEN
+      # Maven resolution only (read:package). FORGEJO_TOKEN above carries
+      # read:repository (rootfs release fetch) and cannot read packages.
+      FORGEJO_MAVEN_TOKEN:
+        from_secret: FORGEJO_MAVEN_TOKEN
