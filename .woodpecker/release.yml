@@ -153,7 +153,25 @@ steps:
         VN=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
         TAGV="${CI_COMMIT_TAG##*/}"
         [ "v$VN" = "$TAGV" ] || { echo "FATAL: tag $TAGV != versionName $VN (updater would never see this release)"; exit 1; }
-        echo "versionCode=$VC versionName=$VN tag=$TAGV (previous-versionCode check: manual gate; no jq in image)"
+        # versionCode monotonicity gate (Oct 22 audit finding #4, machine-enforced):
+        # Android refuses to install a lower versionCode over an existing install —
+        # a regressed VC silently fails the update for every existing user, and the
+        # updater's feed-is-newer invariant assumes VC always advances. The previous
+        # release's VC comes from git history at the previous v* tag — the exact
+        # build.gradle.kts that built it. Fail-closed: no verification, no release.
+        case "$VC" in ''|*[!0-9]*) echo "FATAL: could not extract versionCode from APK badging: $BADGING"; exit 1;; esac
+        if ! git fetch origin 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
+          echo "FATAL: tag fetch failed — cannot verify versionCode monotonicity: $(tail -1 /tmp/tagfetch.err)"; exit 1
+        fi
+        PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -v "^${TAGV}$" | head -1)
+        if [ -n "$PREV_TAG" ]; then
+          PREV_VC=$(git show "$PREV_TAG":app/build.gradle.kts | sed -n "s/.*versionCode *= *\([0-9]*\).*/\1/p" | head -1)
+          [ -n "$PREV_VC" ] || { echo "FATAL: no versionCode in $PREV_TAG:app/build.gradle.kts (file moved or format changed)"; exit 1; }
+          [ "$VC" -gt "$PREV_VC" ] || { echo "FATAL: versionCode regression — candidate VC=$VC <= previous release $PREV_TAG VC=$PREV_VC (Android would refuse the update install for every existing user)"; exit 1; }
+          echo "versionCode=$VC versionName=$VN tag=$TAGV — monotonic gate PASS: VC=$VC > $PREV_TAG VC=$PREV_VC"
+        else
+          echo "versionCode=$VC versionName=$VN tag=$TAGV — no previous v* tag (bootstrap release; monotonicity gate vacuous)"
+        fi
         # set 4: fail loud if the signing toolchain is missing (cold volume)
         # — never silently skip verification.
         [ -x "$ANDROID_HOME/build-tools/36.0.0/apksigner" ] || { echo "FATAL: apksigner missing — the CI image is broken; rebuild ci-beamdown-jdk23-sdk36 via coda/ci-scripts before tagging"; exit 1; }
