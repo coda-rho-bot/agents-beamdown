@@ -1,5 +1,6 @@
 package com.angussoftware.letta.env
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,6 +153,21 @@ class GitChainPayloadContractTest {
             assertFalse(
                 "Corrupt staged tarball must be REMOVED so the next run can download.",
                 java.io.File(files, "git-arm64.tar.gz").exists(),
+            )
+            // Hardening (PR #113 review note, Oct 7): rc≠42 + rm-asserted cannot see a
+            // die-ordering regression — a hoisted/undefined die would exec the stub and
+            // exit with SOME rc≠42, passing both assertions above. Pin the actual failure
+            // branch: die() exits 1 and names the corrupt payload on the merged stream.
+            assertEquals(
+                "die() must exit 1 — rc=$rc means the primary block never reached its die " +
+                    "branch (fall-through or foreign exit). Output: ${out.take(300)}",
+                1,
+                rc,
+            )
+            assertTrue(
+                "Output must carry the corrupt-payload die message — identifies the right " +
+                    "die branch, not just any abnormal exit. Output: ${out.take(300)}",
+                "git payload corrupt" in out,
             )
         } finally {
             fixture.toFile().deleteRecursively()
