@@ -11,14 +11,20 @@
 #          package version equals this; upgrades replace the file)
 # rootfs.tar authority sha256 at generation: 78d4135a33a84c716c5e222435b5f612c44ad73ce15101ea19c291a49e23072c
 # runtime parses the APK asset only; the filesDir copy is diagnostics.
-# git-arm64.tar.gz is intentionally NOT listed (payload-resilience +
-# self-heal download own it; not hashed at runtime).
+# git-arm64.tar.gz + proot-aarch64.tar.gz: payload tarballs are
+# manifest-pinned (R9-5, Oct 22 finding #5) — staging and restore
+# verify content against these entries; the wrapper-side consumption
+# window (git.sh extract + GitHub download) is a documented residual.
 dns-forwarder.js	cfdd5a9783d6f765a496ecbba4111579152023a54afc5e9b67b0952640ab92f5	asset:dns-forwarder.js
 # provenance: apk-asset[dns-forwarder.js]
 dns-shim.js	d0afa6671e11b7d240546ec6f15c9eb51f5350e43745976b5961a311b815b1b2	asset:dns-shim.js
 # provenance: apk-asset[dns-shim.js]
 fs-shim.js	ce5f53990f22663db86782e72a270d42b0774e11913af277c73fbab6f48ba3e6	asset:fs-shim.js
 # provenance: apk-asset[fs-shim.js]
+git-arm64.tar.gz	2879a352c67a8abb19b173ae8551382ca0b1e7ae33a17d4d440e2f6b7e68b5d6	asset:git-arm64.tar.gz
+# provenance: apk-asset[git-arm64.tar.gz]
+proot-aarch64.tar.gz	5d32e54d5dfbd7eafdea824f3ce187f6ab40470f2a7eddcadd8256a897943345	asset:proot-aarch64.tar.gz
+# provenance: apk-asset[proot-aarch64.tar.gz]
 libs/dnsport.so	f09a8cc2a88d0d36b3e70135e43461be7b86a111bdd0adb386f07db198f9edd9	asset:dnsport.so
 # provenance: apk-asset[dnsport.so]
 libs/libc.so.6	43d1729f81d7772b8d046886593c8917fa0d2050ccc4d7e2d45fabe42f0adfb2	rootfs:usr/lib/aarch64-linux-gnu/libc.so.6

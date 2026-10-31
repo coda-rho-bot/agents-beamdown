@@ -17,6 +17,11 @@ HASH ORIGINS (documented per the review):
   - dns-forwarder.js: hashed from its APK asset (Oct 8 follow-up — it was
     installed from the asset but unverified, so a tampered copy silently
     survived every boot).
+  - git-arm64.tar.gz / proot-aarch64.tar.gz: hashed directly from
+    app/src/main/assets/ (R9-5, Oct 31 2026 — closes the finding-#5 seam:
+    the payload tarballs were the one delivery channel into rootfs with no
+    content verification at any consumption boundary; staging and restore
+    now verify against these pins).
   - letta.js PRE-PATCH member bytes: hashed from the rootfs.tar member
     (authority = the CI-pinned rootfs build). The pin verifies bytes as
     EXTRACTED, before applyLettaJsPatches rewrites the file — post-patch
@@ -100,6 +105,8 @@ ASSET_FILES = [
     ("fs-shim.js", "fs-shim.js"),
     ("dns-forwarder.js", "dns-forwarder.js"),
     ("libs/dnsport.so", "dnsport.so"),
+    ("git-arm64.tar.gz", "git-arm64.tar.gz"),
+    ("proot-aarch64.tar.gz", "proot-aarch64.tar.gz"),
 ]
 
 
@@ -179,8 +186,10 @@ def main():
         "#          package version equals this; upgrades replace the file)",
         f"# rootfs.tar authority sha256 at generation: {rootfs_sha}",
         "# runtime parses the APK asset only; the filesDir copy is diagnostics.",
-        "# git-arm64.tar.gz is intentionally NOT listed (payload-resilience +",
-        "# self-heal download own it; not hashed at runtime).",
+        "# git-arm64.tar.gz + proot-aarch64.tar.gz: payload tarballs are",
+        "# manifest-pinned (R9-5, Oct 22 finding #5) — staging and restore",
+        "# verify content against these entries; the wrapper-side consumption",
+        "# window (git.sh extract + GitHub download) is a documented residual.",
     ]
     for dest, sha, src, member, optional, prov in entries:
         tail = (f"\t{member}" if member else "") + ("\toptional" if optional else "")

@@ -225,7 +225,14 @@ class IntegrityManifestTest {
         )
         assertTrue(entries.any { it.dest == "libs/sharp-linux-arm64.node" && it.optional })
         assertTrue(entries.any { it.dest == "libs/libvips-cpp.so.8.17.3" && it.optional })
-        assertFalse(dests.any { it.contains("git-arm64") })
+        // R9-5 (Oct 22 finding #5): payload tarballs ARE manifest-pinned now —
+        // full verify-or-restore entries (the deferral pin flipped with the policy).
+        listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz").forEach { payload ->
+            val e = entries.firstOrNull { it.dest == payload }
+            assertTrue("Manifest must pin $payload (R9-5)", e != null)
+            assertTrue("Payload pin must not be optional: $payload", e != null && !e.optional)
+            assertTrue("Payload pin source must be the APK asset: $payload", e?.source == "asset:$payload")
+        }
     }
 
     @Test

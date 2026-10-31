@@ -228,6 +228,37 @@ class LettaEnvironmentService : Service() {
             MessageDigest.getInstance("SHA-256").digest(bytes)
                 .joinToString("") { "%02x".format(it) }
 
+        /** Chunked-stream sha256 of an InputStream — APK assets are not
+         *  Files; R9-5 payload pin checks hash the asset stream directly. */
+        internal fun sha256Of(input: java.io.InputStream): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+            return md.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        /** R9-5 staging decision for a manifest-pinned payload tarball (Oct 22
+         *  finding #5). Pure — I/O callers map actions to effects: OK = staged
+         *  copy already matches the pin; RESTAGE = rewrite from the immutable
+         *  asset then write-verify; FATAL_* = never stage, never extract —
+         *  leave absent (the wrapper's self-heal download owns absence, not
+         *  corruption) and log the build-integrity break. */
+        internal enum class PayloadStageAction { OK, RESTAGE, FATAL_NO_PIN, FATAL_BROKEN_BUILD }
+
+        internal fun payloadStageDecision(
+            manifestSha: String?, optional: Boolean,
+            assetSha: String?, stagedSha: String?,
+        ): PayloadStageAction = when {
+            manifestSha == null || optional -> PayloadStageAction.FATAL_NO_PIN
+            assetSha == null || assetSha != manifestSha -> PayloadStageAction.FATAL_BROKEN_BUILD
+            stagedSha == manifestSha -> PayloadStageAction.OK
+            else -> PayloadStageAction.RESTAGE
+        }
+
         /**
          * Keystore-backed upgrade-record pin decision (Oct 8 review 2733,
          * option A). Pure — unit-tested directly (PinStateDecisionTest).
@@ -2014,20 +2045,48 @@ class LettaEnvironmentService : Service() {
         // $FILES/proot-aarch64.tar.gz (offline first-run install; falls back
         // to the GitHub plugins-v1 release URLs when absent). proot is staged
         // too so the wrapper shares dx's plugin install without a download.
-        // Large (31.5MB git payload): copy once per install, like rootfs.tar.
-        // Partial-copy self-heal: rootfs uses a marker+verify pattern for the
-        // same class of problem; here a size check is enough (assets are
-        // immutable, so length mismatch = interrupted copy). Rewrite from the
-        // asset on mismatch — no manual cleanup path needed.
+        // R9-5 (Oct 22 finding #5): the tarballs are manifest-pinned — content
+        // verification at BOTH consumption boundaries (staging here, restore
+        // below). The old size-only check let a swapped filesDir copy survive:
+        // the payload is the one delivery channel into rootfs no boot gate
+        // covered (usr/bin/git is not manifest-listed, so an implant persists).
+        // Fail-closed: an unverifiable payload is never staged or extracted.
+        val payloadManifest = parseIntegrityManifest(
+            assets.open("integrity-manifest.txt").bufferedReader().use { it.readText() },
+        ).associateBy { it.dest }
+        // Copy a manifest-pinned payload asset to filesDir and write-verify
+        // the copy against the pin. Never leaves a copy that fails the pin
+        // (interrupted copy, tamper mid-write, disk corruption → deleted).
+        fun stagePayloadVerified(payload: File, expectedSha: String): Boolean {
+            payload.delete()
+            assets.open(payload.name).use { input ->
+                payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
+            }
+            return if (sha256Of(payload) == expectedSha) {
+                log("${payload.name} staged to filesDir (sha256 verified)")
+                true
+            } else {
+                payload.delete()
+                log("FATAL: ${payload.name} staged copy fails manifest pin after rewrite — leaving absent")
+                false
+            }
+        }
         for (payloadName in listOf("git-arm64.tar.gz", "proot-aarch64.tar.gz")) {
             val payload = File(filesDir, payloadName)
-            val assetSize = assets.open(payloadName).use { it.available().toLong() }
-            if (!payload.exists() || payload.length() != assetSize) {
-                if (payload.exists()) payload.delete()
-                assets.open(payloadName).use { input ->
-                    payload.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
+            val entry = payloadManifest[payloadName]
+            val assetSha = assets.open(payloadName).use { sha256Of(it) }
+            val stagedSha = if (payload.exists()) sha256Of(payload) else null
+            when (payloadStageDecision(entry?.sha256, entry?.optional == true, assetSha, stagedSha)) {
+                PayloadStageAction.FATAL_NO_PIN -> {
+                    log("FATAL: no non-optional manifest pin for $payloadName — build integrity break; not staging")
+                    if (payload.exists()) payload.delete()
                 }
-                log("$payloadName staged to filesDir (${assetSize} bytes)")
+                PayloadStageAction.FATAL_BROKEN_BUILD -> {
+                    log("FATAL: APK asset $payloadName fails its manifest pin — broken build; not staging")
+                    if (payload.exists()) payload.delete()
+                }
+                PayloadStageAction.RESTAGE -> stagePayloadVerified(payload, entry!!.sha256)
+                PayloadStageAction.OK -> Unit // staged copy already matches the pin
             }
         }
 
@@ -2053,18 +2112,31 @@ class LettaEnvironmentService : Service() {
             }.not()
             if (needsRestore) {
                 val tarball = File(filesDir, "git-arm64.tar.gz")
-                if (tarball.exists()) {
+                // R9-5 consumption-boundary verification: filesDir is
+                // attacker-writable cache — hash the tarball against the
+                // APK-asset manifest pin BEFORE extraction. A corrupt copy
+                // never feeds tar (and never survives for the wrapper to
+                // extract either): re-stage from the immutable asset, and if
+                // that fails, leave absent — the wrapper's self-heal download
+                // owns absence (documented residual window).
+                val pin = payloadManifest["git-arm64.tar.gz"]?.takeIf { !it.optional }?.sha256
+                var verifiable = pin != null && tarball.exists() && sha256Of(tarball) == pin
+                if (pin != null && tarball.exists() && !verifiable) {
+                    log("git payload tarball fails manifest pin at restore boundary — re-staging from asset")
+                    verifiable = stagePayloadVerified(tarball, pin)
+                }
+                if (verifiable) {
                     val p = ProcessBuilder("tar", "-xzf", tarball.absolutePath, "-C", rootfsDir.absolutePath)
                         .redirectErrorStream(true).start()
                     val out = p.inputStream.bufferedReader().readText()
                     val rc = p.waitFor()
                     if (rc == 0 && rootfsGit.exists()) {
-                        log("git payload restored from staged tarball (was: missing or non-ELF)")
+                        log("git payload restored from staged tarball (was: missing or non-ELF; sha256 verified at boundary)")
                     } else {
                         log("git payload tarball extract failed (rc=$rc): ${out.take(200)}")
                     }
                 } else {
-                    log("git payload needs restore but no staged tarball — wrapper self-heal will download")
+                    log("git payload needs restore but no verifiable staged tarball — wrapper self-heal will download")
                 }
             }
         }.onFailure { log("git payload resilience check failed: ${it.message}") }
