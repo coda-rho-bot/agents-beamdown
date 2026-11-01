@@ -177,7 +177,13 @@ steps:
         if ! git fetch origin 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
           echo "FATAL: tag fetch failed — cannot verify versionCode monotonicity: $(tail -1 /tmp/tagfetch.err)"; exit 1
         fi
-        PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -v "^${TAGV}$" | head -1)
+        # Self-exclusion uses the BARE form $TAGV: TAGV is a runtime shell
+        # var (set above), and braced ${TAGV} is compile-time emptied by
+        # Woodpecker — proven live by #387 (grep -v "^$" filtered nothing,
+        # head -1 picked the release's own tag, gate fail-closed on
+        # VC=47 <= v0.4.34 VC=47). Bare form survives; ${CI_COMMIT_TAG}
+        # (line 154) is fine because pipeline-time variables DO substitute.
+        PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -v "^$TAGV$" | head -1)
         if [ -n "$PREV_TAG" ]; then
           PREV_VC=$(git show "$PREV_TAG":app/build.gradle.kts | sed -n "s/.*versionCode *= *\([0-9]*\).*/\1/p" | head -1)
           [ -n "$PREV_VC" ] || { echo "FATAL: no versionCode in $PREV_TAG:app/build.gradle.kts (file moved or format changed)"; exit 1; }
