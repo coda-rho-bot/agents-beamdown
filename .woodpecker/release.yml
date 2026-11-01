@@ -160,7 +160,13 @@ steps:
         # release's VC comes from git history at the previous v* tag — the exact
         # build.gradle.kts that built it. Fail-closed: no verification, no release.
         case "$VC" in ''|*[!0-9]*) echo "FATAL: could not extract versionCode from APK badging: $BADGING"; exit 1;; esac
-        if ! git fetch origin 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
+        # Tag history fetch for the monotonicity gate. The clone plugin
+        # carries its own netrc (FORGE_CLONE_TOKEN); in-step git does NOT
+        # inherit it (pipeline netrc_user:false — proven by #361's fatal
+        # "could not read Username"). Fix: embed the repo token in the fetch
+        # URL. Stderr routes to /tmp/tagfetch.err and git redacts URL
+        # credentials in error output — the token never hits the log.
+        if ! git fetch "https://coda:${FORGEJO_TOKEN}@git.angussoftware.dev/coda/agents-beamdown.git" 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
           echo "FATAL: tag fetch failed — cannot verify versionCode monotonicity: $(tail -1 /tmp/tagfetch.err)"; exit 1
         fi
         PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -v "^${TAGV}$" | head -1)
@@ -339,6 +345,9 @@ steps:
       ANDROID_HOME: /opt/android-sdk
       FORGEJO_TOKEN:
         from_secret: FORGEJO_TOKEN
+      # FORGEJO_TOKEN (read:repository, coda-scoped): rootfs fetch + release
+      # publish + the monotonicity gate's tag-history fetch (#361 fix —
+      # in-step git has no netrc; the gate embeds it in the fetch URL).
       # Maven resolution only (read:package). FORGEJO_TOKEN above carries
       # read:repository (rootfs fetch + release publish) and cannot read packages.
       FORGEJO_MAVEN_TOKEN:
