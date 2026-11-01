@@ -164,9 +164,13 @@ steps:
         # carries its own netrc (FORGE_CLONE_TOKEN); in-step git does NOT
         # inherit it (pipeline netrc_user:false — proven by #361's fatal
         # "could not read Username"). Fix: embed the repo token in the fetch
-        # URL. Stderr routes to /tmp/tagfetch.err and git redacts URL
-        # credentials in error output — the token never hits the log.
-        if ! git fetch "https://coda:${FORGEJO_TOKEN}@git.angussoftware.dev/coda/agents-beamdown.git" 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
+        # URL — with $$ escaping so compile-time envsubst does not eat it
+        # (#365 fatal: wrapper echo showed "https://coda:@..." — empty token;
+        # $${FORGEJO_TOKEN} survives envsubst and expands at run time to the
+        # from_secret value; secret refs in command text MUST be $$-escaped,
+        # Oct 26 doctrine). Stderr routes to /tmp/tagfetch.err and git redacts
+        # URL credentials in error output — the token never hits the log.
+        if ! git fetch "https://coda:$${FORGEJO_TOKEN}@git.angussoftware.dev/coda/agents-beamdown.git" 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
           echo "FATAL: tag fetch failed — cannot verify versionCode monotonicity: $(tail -1 /tmp/tagfetch.err)"; exit 1
         fi
         PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -v "^${TAGV}$" | head -1)
