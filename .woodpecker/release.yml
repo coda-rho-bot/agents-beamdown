@@ -160,19 +160,20 @@ steps:
         # release's VC comes from git history at the previous v* tag — the exact
         # build.gradle.kts that built it. Fail-closed: no verification, no release.
         case "$VC" in ''|*[!0-9]*) echo "FATAL: could not extract versionCode from APK badging: $BADGING"; exit 1;; esac
-        # Tag history fetch for the monotonicity gate. Two auth facts,
-        # both machine-proven Nov 1 (pipelines #366/#368 URL-embed fails;
-        # probes #370-#380): (1) in-step git does not inherit the clone
-        # plugin's netrc — #361's "could not read Username"; (2) the CI
-        # image's git 2.43 mishandles credentials embedded in the URL on
-        # the 401-challenge path — URL-embed is rejected by Forgejo even
-        # with a valid token, while http.extraHeader auth succeeds. The
-        # header is set as repo-local config so the partial-clone lazy
-        # blob fetch (git show $PREV_TAG:build.gradle.kts) inherits it
-        # too (probe #379: that fetch ALSO needs auth). Header built via
-        # base64 — the token never appears in a URL, process list, or
-        # log; config file is 0600 in the ephemeral workspace.
-        git config http.extraHeader "Authorization: Basic $(printf '%s' "coda:${FORGEJO_TOKEN}" | base64 | tr -d '\n')"
+        # Tag history fetch for the monotonicity gate. Three auth facts,
+        # all machine-proven Nov 1 (pipelines #361-#380): (1) in-step git
+        # does not inherit the clone plugin's netrc (#361); (2) Woodpecker
+        # empties BRACED secret substitutions at compile time — ${FORGEJO_TOKEN}
+        # became the literal empty string in every failed run; the BARE
+        # form $FORGEJO_TOKEN survives and expands in-step (probe #372:
+        # braced → empty → 401; probes #376/#378/#380: bare → delivered
+        # → works); (3) the partial-clone lazy blob fetch (git show
+        # $PREV_TAG:build.gradle.kts) ALSO needs auth (#379) — so the
+        # credential must be repo-local config, not a per-command flag.
+        # Fix: Authorization header built via base64 from the BARE form,
+        # set as repo-local http.extraHeader — every git op inherits it,
+        # and the token never appears in a URL, process list, or log.
+        git config http.extraHeader "Authorization: Basic $(printf '%s' "coda:$FORGEJO_TOKEN" | base64 | tr -d '\n')"
         if ! git fetch origin 'refs/tags/v*:refs/tags/v*' 2>/tmp/tagfetch.err; then
           echo "FATAL: tag fetch failed — cannot verify versionCode monotonicity: $(tail -1 /tmp/tagfetch.err)"; exit 1
         fi
@@ -355,8 +356,9 @@ steps:
       # FORGEJO_TOKEN (read:repository, coda-scoped; value = dedicated CI
       # mint coda-ci-beamdown-2026-11, id 168): rootfs fetch + release
       # publish (API) + the monotonicity gate's git ops via
-      # http.extraHeader (URL-embed auth broken in this image's git 2.43 —
-      # probes #370-#380 Nov 1; header-auth proven through the full gate
+      # http.extraHeader (BARE $FORGEJO_TOKEN only — Woodpecker empties
+      # braced ${FORGEJO_TOKEN} at compile time, machine-proven Nov 1,
+      # pipelines #361-#380; header-auth proven through the full gate
       # chain incl. partial-clone lazy fetch).
       # Maven resolution only (read:package). FORGEJO_TOKEN above carries
       # read:repository (rootfs fetch + release publish) and cannot read packages.
