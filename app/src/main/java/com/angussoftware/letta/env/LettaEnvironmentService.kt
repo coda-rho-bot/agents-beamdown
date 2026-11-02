@@ -216,6 +216,34 @@ class LettaEnvironmentService : Service() {
                 ?.substringAfter(':')?.trim()
                 ?.takeIf { it.matches(Regex("^\\d+\\.\\d+\\.\\d+$")) }
 
+        /** Rootfs-tar authority sha, stamped into the integrity manifest by
+         *  the generator ("# rootfs.tar authority sha256 at generation: <hex>").
+         *  The marker writes this at extraction and re-checks it at boot —
+         *  closes the same-versionCode/different-tar rebuild gap (0.4.35,
+         *  todo 04084c92d9f4): versionCode keying alone can't see a tar
+         *  content swap inside one build number. Null when the header is
+         *  absent (pre-generator manifests) — content-staleness is then
+         *  inert and versionCode keying alone governs, matching the 0.4.34
+         *  closure semantics. */
+        internal fun parseRootfsTarSha(manifestText: String): String? =
+            manifestText.lineSequence()
+                .firstOrNull { it.trim().startsWith("# rootfs.tar authority sha256 at generation:") }
+                ?.substringAfter(':')?.trim()
+                ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
+
+        /** Marker content staleness: the marker must carry the CURRENT tar
+         *  sha. A current-key marker with missing/stale content means the
+         *  tree was extracted from a different rootfs.tar (hotfix rebuild
+         *  under the same versionCode) — treat as stale, re-extract. */
+        internal fun isMarkerContentStale(markerText: String?, expectedTarSha: String?): Boolean {
+            // No expectation available (old manifest) or no content check
+            // possible — not stale by THIS axis (version keying governs).
+            if (expectedTarSha == null) return false
+            // Marker predates content stamping (empty file, 0.4.34 form):
+            // one-time migration — treat as stale so the sha gets stamped.
+            return markerText?.contains(expectedTarSha) != true
+        }
+
         /** Chunked-stream sha256 (never loads whole files into memory). */
         internal fun sha256Of(f: File): String {
             val md = MessageDigest.getInstance("SHA-256")
@@ -1304,23 +1332,70 @@ class LettaEnvironmentService : Service() {
         // old one. Before this, a versionless ".rootfs-extracted" meant every
         // APK update kept the PREVIOUS rootfs forever unless self-heal
         // happened to trip — the stale-rootfs class that bit updates twice.
+        // INVARIANT (Uncia #125 watch-item): every rootfs-marker site keys on
+        // the SAME compile-time BuildConfig.VERSION_CODE (the marker-name site
+        // below AND the staleness-predicate site in the sweep). If either site
+        // ever migrates to a runtime PackageInfo-based version, the two can
+        // diverge mid-update (PackageInfo flips at install-complete,
+        // BuildConfig is frozen per build) and a fresh marker would read as
+        // stale — or worse, a stale one as fresh. Migrate BOTH sites together
+        // or neither.
         val marker = File(filesDir, rootfsMarkerName(BuildConfig.VERSION_CODE))
+        // Tar-authority sha for content keying (see parseRootfsTarSha).
+        val manifestTextForRootfs = runCatching {
+            assets.open("integrity-manifest.txt").bufferedReader().use { it.readText() }
+        }.getOrDefault("")
+        val expectedTarSha = parseRootfsTarSha(manifestTextForRootfs)
 
         // Sweep stale markers: any extraction marker that is not the current
         // key represents an older rootfs generation — drop it (and the tree
-        // it blessed) so the extraction below runs fresh.
+        // it blessed) so the extraction below runs fresh. DELETE IS VERIFIED
+        // (0.4.35, Uncia #125 UGLY-2): a partial deleteRecursively (agent-
+        // chmodded files surviving with EACCES) followed by tar -x would
+        // overlay the survivors and PRESERVE the corruption that triggered
+        // the sweep — the overlay-preservation bug. On delete failure we
+        // fail closed: block the boot rather than extract over a half-dead
+        // tree.
         filesDir.listFiles { f -> isStaleRootfsMarker(f.name, BuildConfig.VERSION_CODE) }
             ?.forEach {
                 log("stale rootfs marker ${'$'}{it.name} (current key ${'$'}{marker.name}) — re-extracting")
                 it.delete()
-                rootfsDir.deleteRecursively()
+                if (!rootfsDir.deleteRecursively()) {
+                    setStatus("failed: stale rootfs not removable")
+                    updateNotification("Update failed — reinstall app")
+                    log("SECURITY: stale rootfs tree partially survived delete — blocking overlay extraction")
+                    return
+                }
             }
 
         // Self-heal: corrupted earlier extraction leaves marker but incomplete rootfs.
+        // Delete verified per the sweep's fail-closed rule.
         if (marker.exists() && !File(rootfsDir, "usr/local/bin/node").exists()) {
             log("marker exists but node missing — rootfs incomplete, re-extracting")
             marker.delete()
-            rootfsDir.deleteRecursively()
+            if (!rootfsDir.deleteRecursively()) {
+                setStatus("failed: corrupt rootfs not removable")
+                updateNotification("Repair failed — reinstall app")
+                log("SECURITY: corrupt rootfs tree partially survived delete — blocking overlay extraction")
+                return
+            }
+        }
+
+        // Content keying (0.4.35, todo 04084c92d9f4): the current-key marker
+        // must also carry the tar sha it was extracted from. Same-versionCode/
+        // different-tar rebuilds (hotfix re-release) mismatch here — sweep
+        // the marker and tree exactly like version-key staleness, verified-
+        // delete rules identical. A 0.4.34-form empty marker (no content)
+        // migrates once: content missing = stale, re-extract, stamp the sha.
+        if (marker.exists() && isMarkerContentStale(runCatching { marker.readText() }.getOrNull(), expectedTarSha)) {
+            log("marker content stale (tar sha mismatch) — re-extracting")
+            marker.delete()
+            if (!rootfsDir.deleteRecursively()) {
+                setStatus("failed: stale-content rootfs not removable")
+                updateNotification("Update failed — reinstall app")
+                log("SECURITY: stale-content rootfs survived delete — blocking overlay extraction")
+                return
+            }
         }
 
         if (!marker.exists()) {
@@ -1352,7 +1427,11 @@ class LettaEnvironmentService : Service() {
                 log("Extraction verification failed — node missing after tar")
                 return
             }
-            marker.createNewFile()
+            // Content stamp (0.4.35): the marker records the tar sha it was
+            // extracted from — isMarkerContentStale re-checks this at boot.
+            // Empty write when the manifest carries no sha header (pre-
+            // generator builds): matches isMarkerContentStale's inert mode.
+            marker.writeText(expectedTarSha ?: "")
             log("Rootfs extracted.")
         }
 

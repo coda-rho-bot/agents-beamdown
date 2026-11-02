@@ -17,6 +17,11 @@ android {
         versionCode = 47
         versionName = "0.4.34"
 
+        // 0.4.35: instrumentation source set (RootfsExtractionOrderTest —
+        // the sweep→heal→extract→verify→marker-last ordering lives in the
+        // Android-runtime method and survives no unit test; Uncia #125).
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         // Self-updater feed auth: the feed is the PUBLIC releases mirror
         // (coda/letta-environment-releases) — unauthenticated fetch is the
         // release default. An optional read token can still be baked in at
@@ -94,6 +99,13 @@ dependencies {
     // method throws "not mocked") — the real implementation is test-only;
     // on-device the framework provides it.
     testImplementation("org.json:json:20240303")
+
+    // Instrumentation (0.4.35): device-file semantics (deleteRecursively on
+    // agent-chmodded trees, marker files under a real filesDir) need the
+    // on-device runner; local units can't reproduce the overlay-preservation
+    // failure mode the ordering test pins.
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 
     // ComponentActivity + activity-result API for the Health Connect
     // permission request contract (HCRequestActivity).

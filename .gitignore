@@ -3,3 +3,4 @@
 build/
 local.properties
 app/src/main/assets/rootfs.tar
+.kotlin/
