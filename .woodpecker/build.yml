@@ -3,17 +3,10 @@
 # including the rootfs download and post-build APK injection, which
 # need the ~194MB gitignored rootfs.tar and are release-only concerns.
 #
-# Repos are private on Forgejo — server-side netrc injection does not work
-# with this setup, so clone auth is explicit: CI_NETRC_* env sourced from
-# the repo-level FORGE_CLONE_TOKEN secret.
-clone:
-  git:
-    image: woodpeckerci/plugin-git
-    environment:
-      CI_NETRC_MACHINE: git.angussoftware.dev
-      CI_NETRC_USERNAME: coda
-      CI_NETRC_PASSWORD:
-        from_secret: FORGE_CLONE_TOKEN
+# Clone: default plugin + server-side netrc auth (explicit CI_NETRC clone blocks broke on
+# Woodpecker 3.20.1 pull_request events; proven via ci-scripts probes Nov 3 2026, todo
+# 09ed1bc97e33 — mirrors angus-bot/angus-gradle-tools#52, wave 7/7 merged Nov 3).
+
 
 when:
   - event: [push, pull_request]
