@@ -23,14 +23,10 @@
 # echo). FATAL guards on every required env.
 #
 # This app does NOT go on Google Play — no AAB, no Play upload step.
-clone:
-  git:
-    image: woodpeckerci/plugin-git
-    environment:
-      CI_NETRC_MACHINE: git.angussoftware.dev
-      CI_NETRC_USERNAME: coda
-      CI_NETRC_PASSWORD:
-        from_secret: FORGE_CLONE_TOKEN
+# Clone: default plugin + server-side netrc auth (explicit CI_NETRC clone blocks broke on
+# Woodpecker 3.20.1 pull_request events; proven via ci-scripts probes Nov 3 2026, todo
+# 09ed1bc97e33 — mirrors angus-bot/angus-gradle-tools#52, wave 7/7 merged Nov 3).
+
 
 when:
   - event: tag
