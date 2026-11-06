@@ -237,6 +237,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (prefs.getString(PREF_KEY, "").isNullOrBlank()) {
             if (isWatch()) showOnboardingWatch() else showOnboarding()
         } else {
+            // Register the delivery observer on the ALREADY-ONBOARDED path
+            // too (0.4.34 backlog, #117 follow-up #2): with standard
+            // launchMode + launcher-intent re-front, a foreground activity
+            // gets NO lifecycle callback when the key-sync listener relaunches
+            // us — notifyKeyDelivered() is the only signal, and it no-ops
+            // against a null callback. The observer body branches on
+            // onboardingShowing (false here), then surfaces the staged-key
+            // confirm dialog.
+            observeKeySyncForOnboarding()
             // Service start deferred to onResume (foreground) — starting the
             // FGS from onCreate crashes on One UI pre-resume (Sep 26).
             if (isWatch()) showMainWatch() else showMain()
@@ -863,6 +872,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 onboardingShowing = false
                 if (isWatch()) showMainWatch() else showMain()
             }
+            // Foreground-already-resumed confirm surfacing (0.4.34 backlog,
+            // follow-up #2 to #117): a staged key arriving while the activity
+            // is up fires NO lifecycle callback (the launch-intent re-front
+            // case the onResume path misses), so the accept dialog never
+            // showed. The listener only STAGES the key — surface the dialog
+            // from the delivery event itself. No-ops when nothing is staged;
+            // main-thread safe (notifyKeyDelivered posts on the main looper).
+            maybeShowKeyConfirm()
         }
     }
 
