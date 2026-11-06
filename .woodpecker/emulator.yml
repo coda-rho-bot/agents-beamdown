@@ -1,0 +1,146 @@
+# Clone: default plugin + server-side netrc auth (explicit CI_NETRC clone blocks broke on
+# Woodpecker 3.20.1 pull_request events; proven via ci-scripts probes Nov 3 2026, todo
+# 09ed1bc97e33 — mirrors build.yml).
+#
+# Connected-run lane (release-gate todo b19a3916657e): boots an AVD and runs
+# :app:connectedDebugAndroidTest (RootfsExtractionOrderTest). Emulator-boot
+# mechanics copied verbatim from angus-bot/angus-software-theming
+# .woodpecker/emulator.yml (proven); the beamdown flow (sdk.dir, rootfs fetch,
+# connected test) mirrors .woodpecker/build.yml.
+
+when:
+  - event: push
+    branch: [main, master]
+  - event: [pull_request, manual]
+
+steps:
+  # Single step: boot emulator + connected tests. Emulator must run in the
+  # same container as the tests (Docker container lifecycle — theming lane).
+  instrumented-tests:
+    image: localhost:5000/ci-theming-emulator:latest
+    privileged: true
+    environment:
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      ANDROID_AVD_HOME: /root/.android/avd
+      GRADLE_USER_HOME: /root/.gradle
+      DISPLAY: :99
+      # Rootfs release fetch (read:repository) — same repo-level secret
+      # build.yml uses; consumed ONLY via os.environ inside fetch-rootfs.py.
+      FORGEJO_TOKEN:
+        from_secret: FORGEJO_TOKEN
+      # Maven resolution only (read:package) — same secret/chain as build.yml:
+      # settings.gradle.kts reads FORGEJO_MAVEN_TOKEN env (FORGEJO_TOKEN
+      # cannot read packages; theming-compose resolves from the private
+      # Forgejo Maven registry).
+      FORGEJO_MAVEN_TOKEN:
+        from_secret: FORGEJO_MAVEN_TOKEN
+    commands:
+      - mkdir -p ~/.gradle
+      - echo "sdk.dir=$ANDROID_HOME" > local.properties
+      - chmod +x gradlew
+      # Build-tools 36.0.0 (AGP 8.13.2 default): the shared SDK volume ships
+      # 35.0.0 only (beamdown's build image bakes 36.0.0 — bt3600 tag).
+      # Guarded install, cached via the SDK volume — same pattern as the
+      # system-image guard below.
+      - |
+        if [ ! -d "$ANDROID_HOME/build-tools/36.0.0" ]; then
+          echo "Installing build-tools 36.0.0..."
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;36.0.0" > /dev/null
+        else
+          echo "build-tools 36.0.0 cached"
+        fi
+      # Download API 34 system image (cached via volume)
+      - |
+        if [ ! -f "$ANDROID_HOME/system-images/android-34/default/x86_64/system.img" ]; then
+          echo "Installing API 34 system image..."
+          rm -rf $ANDROID_HOME/system-images/android-34 $ANDROID_HOME/.temp
+          mkdir -p $ANDROID_HOME/system-images/android-34/default
+          wget -q "https://dl.google.com/android/repository/sys-img/android/x86_64-34_r04.zip" -O /tmp/sys-img.zip
+          unzip -o -q /tmp/sys-img.zip -d $ANDROID_HOME/system-images/android-34/default
+          rm -f /tmp/sys-img.zip
+        else
+          echo "System image cached"
+        fi
+      # Create AVD config (cached via volume)
+      - |
+        if [ ! -f "$ANDROID_AVD_HOME/test.avd/config.ini" ]; then
+          echo "Creating AVD config..."
+          mkdir -p $ANDROID_AVD_HOME/test.avd
+          echo "AvdId=test" > $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "image.sysdir.1=system-images/android-34/default/x86_64/" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.cpu.arch=x86_64" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.cpu.ncore=2" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.ramSize=2048" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "vm.heapSize=256" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.keyboard=yes" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.lcd.density=160" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.lcd.width=480" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "hw.lcd.height=800" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "disk.dataPartition.size=4096M" >> $ANDROID_AVD_HOME/test.avd/config.ini
+          echo "avd.ini.encoding=UTF-8" > $ANDROID_AVD_HOME/test.ini
+          echo "target=android-34" >> $ANDROID_AVD_HOME/test.ini
+          echo "path=$ANDROID_AVD_HOME/test.avd" >> $ANDROID_AVD_HOME/test.ini
+        else
+          echo "AVD config cached"
+        fi
+      # Start emulator
+      - Xvfb :99 -screen 0 480x800x24 &
+      - sleep 2
+      - $ANDROID_HOME/emulator/emulator -avd test -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -memory 2048 -no-snapshot -no-metrics -partition-size 4096 -read-only &
+      - $ANDROID_HOME/platform-tools/adb wait-for-device
+      - |
+        timeout 180 $ANDROID_HOME/platform-tools/adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done' || (echo "Emulator boot timeout!" && exit 1)
+      - echo "Emulator booted"
+      - sleep 5
+      # rootfs.tar is gitignored (~194MB) — the connected build needs it
+      # present. Fetch the current build rootfs from the internal rootfs-source
+      # release attachment. Leak-proof (PR #80 pattern, post-#287):
+      # FORGEJO_TOKEN consumed ONLY via os.environ inside Python; zero
+      # secret references in shell command text (set +x brackets do NOT
+      # suppress the generator echo). Custom User-Agent — Forgejo
+      # 403-blocks the default Python-urllib UA.
+      - |
+        cat > /tmp/fetch-rootfs.py << 'PYEOF'
+        import json, os, shutil, sys, urllib.request
+        TOKEN = os.environ.get('FORGEJO_TOKEN')
+        if not TOKEN:
+            print('FATAL: missing required env: FORGEJO_TOKEN', file=sys.stderr)
+            sys.exit(1)
+        HDRS = {'User-Agent': 'angus-ci/1.0', 'Authorization': 'token ' + TOKEN}
+        API = 'https://git.angussoftware.dev/api/v1/repos/coda/agents-beamdown/releases/tags/internal%2Frootfs-source'
+        try:
+            req = urllib.request.Request(API, headers=HDRS)
+            rel = json.load(urllib.request.urlopen(req, timeout=120))
+            asset = rel['assets'][0]
+            print('rootfs asset:', asset['name'])
+            req = urllib.request.Request(asset['browser_download_url'], headers=HDRS)
+            with urllib.request.urlopen(req, timeout=900) as r, \
+                 open('app/src/main/assets/rootfs.tar', 'wb') as f:
+                shutil.copyfileobj(r, f)
+        except Exception as e:
+            print(f'FATAL: rootfs fetch failed: {e}', file=sys.stderr)
+            sys.exit(1)
+        size = os.path.getsize('app/src/main/assets/rootfs.tar')
+        print(f'rootfs.tar downloaded: {size} bytes')
+
+        # Baked-version assert: prove the rootfs carries the pinned letta-code
+        # (green CI otherwise proves nothing about the pin — PR #115 review 2720).
+        import tarfile as _tf, json as _json
+        with _tf.open('app/src/main/assets/rootfs.tar', 'r:gz') as _t:
+            _f = _t.extractfile('./usr/local/lib/node_modules/@letta-ai/letta-code/package.json')
+            _pkg = _json.loads(_f.read())
+        _pin = open('tools/rootfs-build/PIN').read().strip()
+        if _pkg['version'] != _pin:
+            raise SystemExit(f'FATAL: baked letta-code {_pkg["version"]} != pin {_pin} (refresh rootfs asset or the PIN file)')
+        print(f'baked letta-code {_pkg["version"]} == pin {_pin}')
+        PYEOF
+        python3 /tmp/fetch-rootfs.py
+        ls -la app/src/main/assets/rootfs.tar
+      # Connected run: RootfsExtractionOrderTest (release-gate b19a3916657e)
+      - ./gradlew --no-daemon :app:connectedDebugAndroidTest
+    volumes:
+      - gradle-cache-beamdown-emu:/root/.gradle/caches
+      - gradle-wrapper-beamdown-emu:/root/.gradle/wrapper
+      - android-sdk-base:/opt/android-sdk
+      - android-avd-config-beamdown-emu:/root/.android/avd
