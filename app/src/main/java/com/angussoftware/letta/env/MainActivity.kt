@@ -127,6 +127,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private lateinit var versionLine: TextView
     private lateinit var envLine: TextView
     private var a11yDotView: TextView? = null
+    // Sleep-mode detector (Oct 8 phone evidence, todo 1c15328808a0): Samsung
+    // Sleep mode REMOVES AgentAccessibilityService from enabled_accessibility_services
+    // entirely — agentctl dies with it, and the only symptom is a failed dispatch
+    // much later. Edge-triggered on the 2s renderStatus tick: fires once when a
+    // previously-ON control goes OFF; re-arms when it returns ON.
+    private var a11yWasOn: Boolean = false
     private var a11yTextView: TextView? = null
     // Telemetry card rows (2s tick live-updates grant states).
     private var healthBtnView: Button? = null
@@ -2103,6 +2109,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
             // path entirely; the fix is the phone-side Galaxy Wearable grant.
             a11yDotView?.setTextColor(if (isA11yEnabled()) C.ok else C.warn)
             val a11yOn = isA11yEnabled()
+            // Sleep-mode / revocation detection: notify once per ON->OFF edge.
+            if (!a11yOn && a11yWasOn) {
+                postGuideNotification(
+                    "Phone control was turned OFF",
+                    "Agents Beamdown lost screen-control access (Sleep mode or manual " +
+                    "revoke). The agent cannot operate the phone until it is re-enabled: " +
+                    "Settings → Accessibility → Agents Beamdown Agent. Tap to reopen.")
+            }
+            a11yWasOn = a11yOn
             a11yTextView?.apply {
                 text = if (a11yOn) "Phone control: ON — agent can operate apps"
                        else "Phone control: OFF"
