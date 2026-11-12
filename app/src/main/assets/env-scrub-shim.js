@@ -57,26 +57,29 @@ function wrapSyncOrAsync(fn, argScrubber) {
 // --require modules execute before the entry script, so we patch first.
 // But defensive: also patch the module namespace's properties if mutable.
 
-// spawn(command[, args][, options]) — options is index 1 (no args) or 2 (with args)
+// spawn(command[, args][, options]) — SIGNATURE-POSITION semantics (Uncia R1,
+// review 3783): the LAST non-function argument IS the options object when it
+// sits at a signature position (index 1 or 2); never heuristic-detect by
+// known keys. The old heuristic FAILED OPEN on unknown-only keys ({timeout},
+// {uid}, {gid}, {signal}): the scrubbed env got pushed as a trailing 4th arg,
+// node ignored it, and the child inherited process.env — the key leaked
+// through the patch itself. Reproduced by Uncia; fixed by mirroring the
+// execFile patcher's scan-from-end position check.
 function patchSpawnArgs(args) {
-  const last = args[args.length - 1];
-  if (last && typeof last === "object" && !Array.isArray(last) && (
-    args.length === 2 || args.length === 3 || last.env !== undefined || last.cwd !== undefined ||
-    last.stdio !== undefined || last.shell !== undefined
-  )) {
-    // Only treat the last arg as options if it looks like options (spawn's
-    // signature makes this unambiguous for arrays: [cmd, args, opts] or
-    // [cmd, opts-with-shell]). The conservative check: if it has any
-    // known-options key OR env, treat as options.
-    if (last.env !== undefined || last.stdio !== undefined || last.cwd !== undefined ||
-        last.shell !== undefined || last.windowsHide !== undefined || last.detached !== undefined) {
-      args[args.length - 1] = Object.assign({}, last, { env: scrubEnv(last.env) });
+  for (let i = args.length - 1; i >= 0; i--) {
+    const a = args[i];
+    if (typeof a === "function") continue;
+    if (a && typeof a === "object" && !Array.isArray(a) && i >= 1 && i <= 2) {
+      // Signature position: options at index 1 (cmd, opts) or 2 (cmd, args, opts).
+      args[i] = Object.assign({}, a, { env: scrubEnv(a.env) });
       return;
     }
+    break; // first non-function from the end that isn't a plain object
   }
-  // No recognizable options object → inherit path. Inject explicit scrubbed
-  // env as a trailing options object to defeat the inherit.
-  args.push({ env: scrubEnv(undefined) });
+  // No options at a signature position → inherit path. Inject explicit
+  // scrubbed env as the options argument (at index 1 or 2) to defeat inherit.
+  const opts = { env: scrubEnv(undefined) };
+  args.push(opts);
 }
 
 // execFile(command[, args][, options][, callback]) — scrub options same shape
