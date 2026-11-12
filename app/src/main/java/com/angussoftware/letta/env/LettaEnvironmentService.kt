@@ -863,7 +863,7 @@ class LettaEnvironmentService : Service() {
             "PATH" to File(filesDir, "bin").absolutePath + ":/system/bin:/system/xbin",
             "SHELL" to File(File(filesDir, "bin"), "bash").absolutePath,
             "LD_LIBRARY_PATH" to libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath,
-            "NODE_OPTIONS" to "--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}",
+            "NODE_OPTIONS" to "--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath} --require ${File(filesDir, "env-scrub-shim.js").absolutePath}",
             "UV_USE_IO_URING" to "0",
             "npm_config_registry" to "https://registry.npmjs.org/",
             "npm_config_userconfig" to File(npmHome, ".npmrc").absolutePath,
@@ -1609,7 +1609,7 @@ class LettaEnvironmentService : Service() {
             "export LETTA_CODE_BIN=${bashDir.absolutePath}/letta\n" +
             "export TERM=dumb\n" +
             "export LD_LIBRARY_PATH=$combinedPath\n" +
-            "export NODE_OPTIONS=\"--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath}\"\n" +
+            "export NODE_OPTIONS=\"--require ${File(filesDir, "fs-shim.js").absolutePath} --require ${File(filesDir, "dns-shim.js").absolutePath} --require ${File(filesDir, "env-scrub-shim.js").absolutePath}\"\n" +
             "export UV_USE_IO_URING=0\n" +
             // DNS forwarder for the glibc git ELF chain (Sep 28): dnsport.so
             // (LD_PRELOAD getaddrinfo override inside git-elf) sends raw DNS
@@ -1822,7 +1822,7 @@ class LettaEnvironmentService : Service() {
             val tb = File(rootfsDir, "usr/bin/true").absolutePath
             val lettaJsP = File(rootfsDir, "usr/local/lib/node_modules/@letta-ai/letta-code/letta.js").absolutePath
             val pb3 = ProcessBuilder(stl.absolutePath, File(libDir, "libldlnx.so").absolutePath, "--library-path", libDir.absolutePath + ":" + File(filesDir, "libs").absolutePath, File(libDir, "libnode.so").absolutePath, lettaJsP, "server", "--env-name", envName()).redirectErrorStream(true)
-            pb3.environment()["NODE_OPTIONS"] = "--require " + File(filesDir, "fs-shim.js").absolutePath + " --require " + File(filesDir, "dns-shim.js").absolutePath
+            pb3.environment()["NODE_OPTIONS"] = "--require " + File(filesDir, "fs-shim.js").absolutePath + " --require " + File(filesDir, "dns-shim.js").absolutePath + " --require " + File(filesDir, "env-scrub-shim.js").absolutePath
             pb3.environment()["LETTA_API_KEY"] = apiKey()
             pb3.environment()["HOME"] = File(rootfsDir, "root").absolutePath
             pb3.environment()["TMPDIR"] = File(rootfsDir, "tmp").absolutePath

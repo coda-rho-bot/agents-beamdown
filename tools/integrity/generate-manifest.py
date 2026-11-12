@@ -103,6 +103,7 @@ SWAP_STAGED = [
 ASSET_FILES = [
     ("dns-shim.js", "dns-shim.js"),
     ("fs-shim.js", "fs-shim.js"),
+    ("env-scrub-shim.js", "env-scrub-shim.js"),
     ("dns-forwarder.js", "dns-forwarder.js"),
     ("libs/dnsport.so", "dnsport.so"),
     ("git-arm64.tar.gz", "git-arm64.tar.gz"),

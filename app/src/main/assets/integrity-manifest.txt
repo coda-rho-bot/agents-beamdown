@@ -19,6 +19,8 @@ dns-forwarder.js	cfdd5a9783d6f765a496ecbba4111579152023a54afc5e9b67b0952640ab92f
 # provenance: apk-asset[dns-forwarder.js]
 dns-shim.js	d0afa6671e11b7d240546ec6f15c9eb51f5350e43745976b5961a311b815b1b2	asset:dns-shim.js
 # provenance: apk-asset[dns-shim.js]
+env-scrub-shim.js	6447b4d2945eb0b24a66434a12e6a77bd2273ac0380f18193454b50adff131e6	asset:env-scrub-shim.js
+# provenance: apk-asset[env-scrub-shim.js]
 fs-shim.js	ce5f53990f22663db86782e72a270d42b0774e11913af277c73fbab6f48ba3e6	asset:fs-shim.js
 # provenance: apk-asset[fs-shim.js]
 git-arm64.tar.gz	2879a352c67a8abb19b173ae8551382ca0b1e7ae33a17d4d440e2f6b7e68b5d6	asset:git-arm64.tar.gz
