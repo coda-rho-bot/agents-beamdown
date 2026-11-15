@@ -1086,10 +1086,15 @@ class LettaEnvironmentService : Service() {
      * Auto-upgrade network gate: unmetered AND internet-capable. Metered or
      * offline boots defer the check to the next boot (no pref write).
      */
-    private fun isUnmeteredOnline(): Boolean {
+    private fun isUnmeteredOnline(): Boolean = try {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !cm.isActiveNetworkMetered
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !cm.isActiveNetworkMetered
+    } catch (_: SecurityException) {
+        // Normal-perm missing (or OEM denial): treat as "can't verify" —
+        // defer the auto-upgrade check to next boot instead of crashing the
+        // boot path (watch, Nov 14).
+        false
     }
 
     /**
@@ -1359,6 +1364,7 @@ class LettaEnvironmentService : Service() {
         filesDir.listFiles { f -> isStaleRootfsMarker(f.name, BuildConfig.VERSION_CODE) }
             ?.forEach {
                 log("stale rootfs marker ${'$'}{it.name} (current key ${'$'}{marker.name}) — re-extracting")
+                clearUpgradeRecordAtExtraction()
                 it.delete()
                 if (!rootfsDir.deleteRecursively()) {
                     setStatus("failed: stale rootfs not removable")
@@ -1372,6 +1378,7 @@ class LettaEnvironmentService : Service() {
         // Delete verified per the sweep's fail-closed rule.
         if (marker.exists() && !File(rootfsDir, "usr/local/bin/node").exists()) {
             log("marker exists but node missing — rootfs incomplete, re-extracting")
+            clearUpgradeRecordAtExtraction()
             marker.delete()
             if (!rootfsDir.deleteRecursively()) {
                 setStatus("failed: corrupt rootfs not removable")
@@ -1389,6 +1396,7 @@ class LettaEnvironmentService : Service() {
         // migrates once: content missing = stale, re-extract, stamp the sha.
         if (marker.exists() && isMarkerContentStale(runCatching { marker.readText() }.getOrNull(), expectedTarSha)) {
             log("marker content stale (tar sha mismatch) — re-extracting")
+            clearUpgradeRecordAtExtraction()
             marker.delete()
             if (!rootfsDir.deleteRecursively()) {
                 setStatus("failed: stale-content rootfs not removable")
@@ -2621,6 +2629,26 @@ class LettaEnvironmentService : Service() {
         null // fail-closed: unverifiable record -> pin applies
     }
 
+    /**
+     * Clear the Keystore-backed upgrade record. Called ONLY at
+     * service-initiated rootfs re-extractions: the tar carries the PINNED
+     * letta.js, so any npm-upgrade record is stale by construction and its
+     * next pin check would false-positive UPGRADED_TAMPERED (the watch,
+     * Nov 14: stale-marker re-extraction replaced an upgraded 0.34.61 with
+     * tar 0.34.4 while the record still blessed 0.34.61 → boot blocked
+     * "Failed" forever). Record-absent re-arms the pin over authority
+     * bytes — the same safe state as the documented attacker-deletes-record
+     * case; tamper protection is never weakened (an attacker clearing the
+     * record cannot write a new one — Keystore MAC).
+     */
+    private fun clearUpgradeRecordAtExtraction() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .remove(PREF_UPGRADE_RECORD)
+            .remove(PREF_UPGRADE_RECORD_MAC)
+            .apply()
+        log("UPGRADE-RECORD: cleared at rootfs re-extraction (tar authority restored; npm-upgrade record stale by construction)")
+    }
+
     private fun writeUpgradeRecord(version: String, lettaJsSha256: String): Boolean {
         // Writer-side guard (review 2734 non-blocker b): refuse degenerate
         // rows — an empty version or sha would mint a MAC over exactly the
@@ -2714,6 +2742,11 @@ class LettaEnvironmentService : Service() {
         rotateIfLarge(File(filesDir, "server.log"), MAX_LOG_BYTES)
         val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         File(filesDir, "server.log").appendText("[$ts] $msg\n")
+        // DIAGNOSTIC MIRROR (Nov 14, watch "Failed" post-upgrade): release
+        // builds have no run-as; logcat is the only remote-readable channel.
+        // Cheap (one Log.i per line), remove once the boot-failure class is
+        // fixed — or keep: it aids every future field diagnosis.
+        android.util.Log.i("BeamdownLog", msg.take(300))
     }
 
     /** Rotate f to f.1 (replacing any prior f.1) once it exceeds cap bytes. */

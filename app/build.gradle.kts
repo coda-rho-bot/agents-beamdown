@@ -14,8 +14,8 @@ android {
         applicationId = "com.angussoftware.letta.env"
         minSdk = 26
         targetSdk = 28
-        versionCode = 47
-        versionName = "0.4.34"
+        versionCode = 48
+        versionName = "0.4.35"
 
         // 0.4.35: instrumentation source set (RootfsExtractionOrderTest —
         // the sweep→heal→extract→verify→marker-last ordering lives in the
