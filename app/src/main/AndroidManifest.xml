@@ -3,6 +3,12 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- isUnmeteredOnline() (auto-upgrade network gate) queries
+         ConnectivityManager/NetworkCapabilities — ACCESS_NETWORK_STATE is a
+         normal perm but must be DECLARED; without it the first-boot
+         auto-upgrade check throws SecurityException and the whole boot
+         dies "Failed" (watch, Nov 14 — caught via BeamdownLog mirror). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
