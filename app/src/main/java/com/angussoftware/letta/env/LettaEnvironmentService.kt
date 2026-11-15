@@ -1413,6 +1413,14 @@ class LettaEnvironmentService : Service() {
         }
 
         if (!marker.exists()) {
+            // Record-clear at the marker-absent path too (PR #142 follow-up,
+            // flagged by review 3838): a same-uid attacker deleting the
+            // CURRENT-key marker reaches this unconditional extraction;
+            // tar bytes + a still-valid old upgrade record = UPGRADED_TAMPERED
+            // brick until reinstall. Same tar-is-authority argument as the
+            // three sites above — extraction from APK authority makes any
+            // npm-upgrade record stale by construction.
+            clearUpgradeRecordAtExtraction()
             setStatus("extracting rootfs (first run)")
             log("Extracting rootfs...")
             rootfsDir.mkdirs()
