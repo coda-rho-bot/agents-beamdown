@@ -435,6 +435,12 @@ class LettaEnvironmentService : Service() {
                 RegStatus("registered with Letta Cloud", "Registered — online")
             line.contains("[Listen V2]") ->
                 RegStatus("online — listener active", null)
+            // letta-code 0.34.x listener handshake (Nov 14 live capture):
+            // the earlier strings don't appear in 0.34 output — without this
+            // match the notification stays "Starting..." forever while the
+            // server is fully online and heartbeating.
+            line.contains("Connected. Awaiting instructions.") ->
+                RegStatus("online — listener active", null)
             else -> null
         }
 
